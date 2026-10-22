@@ -1,0 +1,17 @@
+.toolcache/
+.gradle/
+build/
+**/build/
+local.properties
+.idea/
+*.iml
+analysis/api/*.json
+analysis/rea/*.json
+# Reverse-engineering notes and local API smoke output are working artifacts.
+analysis/
+# Keep local verification tests out of the public source snapshot.
+**/src/test/
+**/src/androidTest/
+*.apk
+*.aab
+.DS_Store

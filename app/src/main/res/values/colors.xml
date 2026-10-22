@@ -1,0 +1,9 @@
+<resources>
+    <color name="blbl_blue">#00AEEC</color>
+    <color name="blbl_blue_dark">#0088B8</color>
+    <color name="blbl_background">#101216</color>
+    <color name="blbl_surface">#1B1F26</color>
+    <color name="blbl_text">#F3F5F7</color>
+    <color name="blbl_muted">#A8B0BA</color>
+</resources>
+

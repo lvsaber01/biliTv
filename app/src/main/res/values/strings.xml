@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">biliTv</string>
+    <string name="search_hint">搜索视频或输入 BV 号</string>
+</resources>
+

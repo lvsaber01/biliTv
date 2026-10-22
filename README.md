@@ -19,8 +19,6 @@
 - WBI 动态签名，以及普通接口失败后的兼容回退
 - Android TV Leanback 启动入口与 TV banner
 
-平板 UI 和播放问题的定位与设计记录见 `analysis/UI_REDESIGN.md`。
-
 ## 构建与安装
 
 ```bash
@@ -64,11 +62,8 @@ WBI 的 `imgKey` / `subKey` 每次从 `/x/web-interface/nav` 动态提取，签�
 - 已验证公开接口：view、普通 playurl、player v2、WBI v2、nav、hotword、二维码生成及未扫码轮询
 - 当前环境没有连接 Android 真机或模拟器，因此未进行实际 UI 点击和播放回归；安装命令已保留在上面
 
-逆向结论和接口实测记录见：
-
-- `analysis/REA_FINDINGS.md`
-- `analysis/API_MATRIX.md`
-- `analysis/rea/` 下的 REA 结构化证据
-- `analysis/api/` 下的接口响应快照
-
 版本变更记录见 [CHANGELOG.md](CHANGELOG.md)。后续开发使用 Git 提交和版本 tag 管理，版本号遵循语义化版本规则。
+
+## 仓库边界
+
+公开仓库只跟踪可构建的 Android 源码、资源、Gradle 配置和版本文档。反向工程过程记录、接口响应快照、构建输出和本地测试文件均不纳入版本库；对应规则见 `.gitignore`。

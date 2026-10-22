@@ -67,6 +67,8 @@ WBI 的 `imgKey` / `subKey` 每次从 `/x/web-interface/nav` 动态提取，签�
 
 版本变更记录见 [CHANGELOG.md](CHANGELOG.md)。后续开发使用 Git 提交和版本 tag 管理，版本号遵循语义化版本规则。
 
+需求分析与实施确认流程见 [docs/REQUIREMENTS_WORKFLOW.md](docs/REQUIREMENTS_WORKFLOW.md)。涉及页面、接口、设置或核心交互的功能，会先完成需求评估和范围确认，再进入编码。
+
 ## 仓库边界
 
 公开仓库只跟踪可构建的 Android 源码、资源、Gradle 配置和版本文档。反向工程过程记录、接口响应快照、构建输出和本地测试文件均不纳入版本库；对应规则见 `.gitignore`。

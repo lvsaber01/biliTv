@@ -10,6 +10,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.GridLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -25,6 +26,42 @@ import com.lvsaber.blblrebuild.data.VideoSummary
 
 @UnstableApi
 class MainActivity : AppCompatActivity() {
+    private data class HomeRailConfig(
+        val key: String,
+        val title: String,
+        val rid: Int?,
+    )
+
+    private class RailUi(
+        val config: HomeRailConfig,
+        val row: LinearLayout,
+        val scroll: HorizontalScrollView,
+        val status: TextView,
+    ) {
+        var sourceVideos: List<VideoSummary> = emptyList()
+        var visibleCount = 0
+        var page = 1
+        var loading = false
+        var generation = 0
+    }
+
+    private val channelRails = listOf(
+        HomeRailConfig("animation", "动画", 1),
+        HomeRailConfig("music", "音乐", 3),
+        HomeRailConfig("dance", "舞蹈", 129),
+        HomeRailConfig("game", "游戏", 4),
+        HomeRailConfig("knowledge", "知识", 36),
+        HomeRailConfig("life", "生活", 160),
+        HomeRailConfig("food", "美食", 211),
+        HomeRailConfig("digital", "科技数码", 188),
+    )
+
+    private companion object {
+        const val FEATURED_RAIL_KEY = "featured"
+        const val RAIL_CHUNK_SIZE = 8
+        const val AUTO_LOAD_THRESHOLD_DP = 96
+    }
+
     private lateinit var api: BiliApiClient
     private lateinit var content: FrameLayout
     private lateinit var homeGrid: GridLayout
@@ -38,6 +75,8 @@ class MainActivity : AppCompatActivity() {
     private var columns = 2
     private var appSettings = AppSettings()
     private var refreshHomeOnResume = false
+    private var homeLoadToken = 0
+    private val railViews = mutableMapOf<String, RailUi>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -109,6 +148,14 @@ class MainActivity : AppCompatActivity() {
         heading.addView(Ui.text(this, "发现", 29f, Ui.text).apply { setPadding(0, Ui.dp(context, 12), 0, 0) })
         heading.addView(Ui.text(this, "热门内容 · 随时发现新视频", 13f, Ui.muted).apply { setPadding(0, 0, 0, Ui.dp(context, 10)) })
         header.addView(heading, LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(Ui.chip(this, "刷新", false) {
+            loadHome()
+        }.apply {
+            Ui.focusHighlight(this)
+            layoutParams = LinearLayout.LayoutParams(Ui.dp(this@MainActivity, 66), Ui.dp(this@MainActivity, 34)).apply {
+                marginStart = Ui.dp(this@MainActivity, 8)
+            }
+        })
         header.addView(buildStyleToggle())
         header.addView(buildColumnSelector())
         page.addView(header, LinearLayout.LayoutParams(-1, Ui.dp(this, 80)))
@@ -272,14 +319,27 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadHome() {
+        val requestToken = ++homeLoadToken
+        railViews.clear()
+        homeStatus.text = "正在刷新推荐和频道…"
+        homeContainer.removeAllViews()
         AppExecutors.io.execute {
-            runCatching { api.getPopularVideos() }
-                .onSuccess { videos -> runOnUiThread {
+            val result = runCatching { api.getPopularVideos() }
+            runOnUiThread {
+                if (requestToken != homeLoadToken) return@runOnUiThread
+                result.onSuccess { videos ->
                     homeVideos = videos
                     renderHome(videos)
-                    homeStatus.text = "热门视频 · ${videos.size} 条"
-                } }
-                .onFailure { error -> runOnUiThread { homeStatus.text = "热门列表加载失败：${friendlyMessage(error)}" } }
+                    homeStatus.text = if (appSettings.homeStyle == AppSettings.HomeStyle.RAILS) {
+                        "推荐 ${videos.size} 条 · 左滑到轨道末尾自动加载更多"
+                    } else {
+                        "热门视频 · ${videos.size} 条"
+                    }
+                }.onFailure { error ->
+                    homeStatus.text = "推荐列表加载失败：${friendlyMessage(error)}"
+                    homeContainer.addView(Ui.button(this, "重新加载") { loadHome() })
+                }
+            }
         }
     }
 
@@ -333,74 +393,182 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderRails(target: LinearLayout, videos: List<VideoSummary>) {
-        if (videos.isEmpty()) {
-            target.addView(Ui.text(this, "没有找到可显示的热门内容。", 16f, Ui.muted))
-            return
-        }
-        val heroVideo = videos.first()
-        val hero = FrameLayout(this).apply {
-            background = Ui.roundedBackground(Ui.surface, Ui.dp(context, 14))
-            isClickable = true
-            isFocusable = true
-            setOnClickListener {
-                startActivity(Intent(this@MainActivity, VideoDetailActivity::class.java).putExtra(VideoDetailActivity.EXTRA_BVID, heroVideo.bvid))
+        if (videos.isNotEmpty()) {
+            val heroVideo = videos.first()
+            val hero = FrameLayout(this).apply {
+                background = Ui.roundedBackground(Ui.surface, Ui.dp(context, 14))
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    startActivity(Intent(this@MainActivity, VideoDetailActivity::class.java).putExtra(VideoDetailActivity.EXTRA_BVID, heroVideo.bvid))
+                }
             }
+            Ui.focusHighlight(hero)
+            val heroPoster = Ui.poster(this)
+            hero.addView(heroPoster, FrameLayout.LayoutParams(-1, Ui.dp(this, 248)))
+            CoverLoader.load(heroPoster, heroVideo.coverUrl)
+            val shade = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.BOTTOM
+                setPadding(Ui.dp(context, 18), Ui.dp(context, 70), Ui.dp(context, 18), Ui.dp(context, 16))
+                setBackgroundColor(0xCC0B0E12.toInt())
+            }
+            shade.addView(Ui.text(this, "本期推荐", 12f, Ui.blue).apply { setPadding(0, 0, 0, Ui.dp(context, 4)) })
+            shade.addView(Ui.text(this, heroVideo.title, 23f, Ui.text).apply {
+                maxLines = 2
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(0, 0, 0, Ui.dp(context, 4))
+            })
+            shade.addView(Ui.text(this, "${heroVideo.author.ifBlank { "未知 UP" }}  ·  ${heroVideo.duration}  ·  播放 ${formatCount(heroVideo.views)}", 13f, Ui.muted).apply {
+                setPadding(0, 0, 0, 0)
+            })
+            hero.addView(shade, FrameLayout.LayoutParams(-1, Ui.dp(this, 248)))
+            target.addView(hero, LinearLayout.LayoutParams(-1, Ui.dp(this, 248)).apply {
+                bottomMargin = Ui.dp(this@MainActivity, 20)
+            })
         }
-        Ui.focusHighlight(hero)
-        val heroPoster = Ui.poster(this)
-        hero.addView(heroPoster, FrameLayout.LayoutParams(-1, Ui.dp(this, 248)))
-        CoverLoader.load(heroPoster, heroVideo.coverUrl)
-        val shade = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.BOTTOM
-            setPadding(Ui.dp(context, 18), Ui.dp(context, 70), Ui.dp(context, 18), Ui.dp(context, 16))
-            setBackgroundColor(0xCC0B0E12.toInt())
-        }
-        shade.addView(Ui.text(this, "本期推荐", 12f, Ui.blue).apply { setPadding(0, 0, 0, Ui.dp(context, 4)) })
-        shade.addView(Ui.text(this, heroVideo.title, 23f, Ui.text).apply {
-            maxLines = 2
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            setPadding(0, 0, 0, Ui.dp(context, 4))
-        })
-        shade.addView(Ui.text(this, "${heroVideo.author.ifBlank { "未知 UP" }}  ·  ${heroVideo.duration}  ·  播放 ${formatCount(heroVideo.views)}", 13f, Ui.muted).apply {
-            setPadding(0, 0, 0, 0)
-        })
-        hero.addView(shade, FrameLayout.LayoutParams(-1, Ui.dp(this, 248)))
-        target.addView(hero, LinearLayout.LayoutParams(-1, Ui.dp(this, 248)).apply {
-            bottomMargin = Ui.dp(this@MainActivity, 20)
-        })
 
-        val groups = videos.chunked(8)
-        groups.forEachIndexed { index, group ->
-            addRail(target, when (index) {
-                0 -> "热门精选"
-                1 -> "继续发现"
-                else -> "更多推荐"
-            }, group)
+        addRail(
+            target = target,
+            config = HomeRailConfig(FEATURED_RAIL_KEY, "热门精选", null),
+            initialVideos = videos,
+        )
+        channelRails.forEach { config ->
+            addRail(target, config)
         }
     }
 
-    private fun addRail(target: LinearLayout, title: String, videos: List<VideoSummary>) {
-        target.addView(Ui.text(this, title, 20f, Ui.text).apply {
+    private fun addRail(
+        target: LinearLayout,
+        config: HomeRailConfig,
+        initialVideos: List<VideoSummary> = emptyList(),
+    ) {
+        val header = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(Ui.text(this, config.title, 20f, Ui.text).apply {
             setPadding(0, 0, 0, Ui.dp(context, 8))
+        }, LinearLayout.LayoutParams(0, Ui.dp(this, 44), 1f))
+        val status = Ui.text(this, if (initialVideos.isEmpty()) "加载中…" else "${initialVideos.size} 条", 12f, Ui.muted).apply {
+            setPadding(Ui.dp(context, 8), 0, Ui.dp(context, 8), Ui.dp(context, 8))
+        }
+        header.addView(status)
+        header.addView(Ui.chip(this, "刷新", false) {
+            refreshRail(config.key)
+        }.apply {
+            Ui.focusHighlight(this)
+            layoutParams = LinearLayout.LayoutParams(Ui.dp(this@MainActivity, 62), Ui.dp(this@MainActivity, 34)).apply {
+                marginStart = Ui.dp(this@MainActivity, 4)
+                bottomMargin = Ui.dp(this@MainActivity, 8)
+            }
         })
+        target.addView(header)
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, 0, Ui.dp(context, 8), Ui.dp(context, 4))
         }
-        videos.forEach { video ->
-            row.addView(videoCard(video), LinearLayout.LayoutParams(Ui.dp(this, 270), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                marginEnd = Ui.dp(this@MainActivity, 12)
-            })
-        }
-        val horizontal = android.widget.HorizontalScrollView(this).apply {
+        val horizontal = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             isFillViewport = false
             addView(row, ViewGroup.LayoutParams(-2, -2))
         }
+        val rail = RailUi(config, row, horizontal, status).apply {
+            sourceVideos = initialVideos
+            visibleCount = minOf(RAIL_CHUNK_SIZE, initialVideos.size)
+        }
+        railViews[config.key] = rail
+        horizontal.setOnScrollChangeListener { _, scrollX, _, oldScrollX, _ ->
+            val threshold = Ui.dp(this@MainActivity, AUTO_LOAD_THRESHOLD_DP)
+            val atEnd = scrollX + horizontal.width >= row.width - threshold
+            if (scrollX > oldScrollX && atEnd) loadMoreRail(config.key)
+        }
         target.addView(horizontal, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = Ui.dp(this@MainActivity, 22)
         })
+        if (initialVideos.isEmpty()) {
+            loadRail(config.key, reset = true)
+        } else {
+            renderRailItems(rail)
+        }
+    }
+
+    private fun refreshRail(key: String) {
+        val rail = railViews[key] ?: return
+        if (rail.loading) return
+        rail.sourceVideos = emptyList()
+        rail.visibleCount = 0
+        rail.page = 1
+        renderRailItems(rail)
+        loadRail(key, reset = true)
+    }
+
+    private fun loadMoreRail(key: String) {
+        val rail = railViews[key] ?: return
+        if (rail.loading) return
+        if (rail.visibleCount < rail.sourceVideos.size) {
+            rail.visibleCount = minOf(rail.visibleCount + RAIL_CHUNK_SIZE, rail.sourceVideos.size)
+            renderRailItems(rail)
+        } else {
+            loadRail(key, reset = false)
+        }
+    }
+
+    private fun loadRail(key: String, reset: Boolean) {
+        val rail = railViews[key] ?: return
+        if (rail.loading) return
+        rail.loading = true
+        val generation = ++rail.generation
+        val nextPage = if (reset) 1 else rail.page + 1
+        rail.status.text = if (reset) "刷新中…" else "加载更多…"
+        AppExecutors.io.execute {
+            val result = runCatching {
+                rail.config.rid?.let { api.getRegionVideos(it) }
+                    ?: api.getPopularVideos(nextPage, 20)
+            }
+            runOnUiThread {
+                val currentRail = railViews[key]
+                if (currentRail !== rail || rail.generation != generation) return@runOnUiThread
+                rail.loading = false
+                result.onSuccess { videos ->
+                    val previousSize = rail.sourceVideos.size
+                    val previousVisible = rail.visibleCount
+                    val existing = rail.sourceVideos.asSequence().map { it.bvid }.toSet()
+                    val incoming = if (reset) {
+                        videos
+                    } else {
+                        rail.sourceVideos + videos.filterNot { it.bvid in existing }
+                    }
+                    rail.sourceVideos = incoming
+                    rail.page = nextPage
+                    if (reset) {
+                        rail.visibleCount = minOf(RAIL_CHUNK_SIZE, incoming.size)
+                    } else if (incoming.size > previousSize) {
+                        rail.visibleCount = minOf(previousVisible + RAIL_CHUNK_SIZE, incoming.size)
+                    }
+                    renderRailItems(rail)
+                    if (!reset && incoming.size == previousSize) {
+                        rail.status.text = "当前榜单已加载完 · 点击刷新换一批"
+                    }
+                }.onFailure { error ->
+                    rail.status.text = "加载失败 · ${friendlyMessage(error)}"
+                }
+            }
+        }
+    }
+
+    private fun renderRailItems(rail: RailUi) {
+        rail.row.removeAllViews()
+        rail.sourceVideos.take(rail.visibleCount).forEach { video ->
+            rail.row.addView(videoCard(video), LinearLayout.LayoutParams(Ui.dp(this, 270), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                marginEnd = Ui.dp(this@MainActivity, 12)
+            })
+        }
+        rail.status.text = when {
+            rail.loading -> "加载中…"
+            rail.sourceVideos.isEmpty() -> "暂无内容"
+            rail.visibleCount < rail.sourceVideos.size -> "${rail.visibleCount}/${rail.sourceVideos.size} · 左滑继续"
+            else -> "${rail.visibleCount} 条 · 滑到末尾加载更多"
+        }
     }
 
     private fun videoCard(video: VideoSummary): View {

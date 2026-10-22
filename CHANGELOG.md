@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.0] - 2026-10-22
+
+### Added
+
+- 首页新增一键刷新推荐内容。
+- Netflix 风格轨道支持横向滑到末尾自动追加内容，轨道内同时提供手动刷新按钮。
+- 新增动画、音乐、舞蹈、游戏、知识、生活、美食和科技数码分区热门轨道。
+- 接入 Bilibili 当前分区排行榜接口 `/x/web-interface/ranking/v2`，并保留旧排行榜接口回退。
+
+### Verification
+
+- 美食分区排行榜接口实测返回 `code=0`，当前返回 97 条视频。
+- `:app:assembleDebug` 通过。
+- `:app:testDebugUnitTest` 通过。
+- `:app:lintDebug` 通过。
+
 ## [0.1.0] - 2026-10-22
 
 这是 biliTv 当前重建版本的第一个 Git 基线版本。

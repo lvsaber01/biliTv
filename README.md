@@ -1,12 +1,14 @@
 # biliTv
 
-当前版本：`0.1.0`（Git 基线：`v0.1.0`）
+当前版本：`0.2.0`
 
 这是一个基于 `source/BBLL1.5.2.apk` 的独立重建项目。目标不是恢复原始工程，而是使用 REA 对 APK 做静态证据分析后，重新实现一个可以直接构建和使用的 Android / Android TV Bilibili 客户端。
 
 ## 当前能力
 
 - 首页热门视频：默认使用 Netflix TV 风格的 hero + 横向内容轨道，也可切换到封面网格
+- 首页支持一键刷新推荐；热门精选和各分区轨道支持横向滑到末尾自动加载更多
+- 分区轨道覆盖动画、音乐、舞蹈、游戏、知识、生活、美食和科技数码
 - 网格支持每行 1 / 2 / 3 个视频并记住选择；卡片显示封面、标题、UP 主、时长和统计
 - 关键词搜索与 BV 号直达
 - 视频详情、作者/统计信息、多 P 选择
@@ -37,6 +39,7 @@ Bilibili 的部分 Web 接口要求 WBI 签名，而且接口可能返回 412、
 | 功能 | 主路径 | 回退/备注 |
 | --- | --- | --- |
 | 热门 | `/x/web-interface/popular` | 公开接口 |
+| 分区热门 | `/x/web-interface/ranking/v2` | 按 `rid` 获取动画、音乐、游戏、美食等分区排行榜；回退 `/x/web-interface/ranking` |
 | 搜索 | `/x/web-interface/wbi/search/type` | 回退 `/x/web-interface/search/type` |
 | 详情 | `/x/web-interface/view` | 按 BVID |
 | 播放 | `/x/player/playurl` | 回退 WBI playurl；MP4 durl 或 DASH video/audio，按设置自动选择 |

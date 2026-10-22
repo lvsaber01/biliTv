@@ -25,6 +25,27 @@ class BiliApiClient(context: Context) {
         return list.toVideoSummaries()
     }
 
+    /**
+     * Loads the current leaderboard for one of Bilibili's top-level video
+     * partitions. The v2 endpoint is the current web endpoint; the legacy
+     * ranking path remains a compatibility fallback for older responses.
+     */
+    fun getRegionVideos(rid: Int): List<VideoSummary> {
+        val root = runCatching {
+            get(
+                "/x/web-interface/ranking/v2",
+                mapOf("rid" to rid.toString(), "type" to "all"),
+            )
+        }.recoverCatching {
+            get(
+                "/x/web-interface/ranking",
+                mapOf("rid" to rid.toString(), "day" to "3"),
+            )
+        }.getOrThrow()
+        val list = root.optJSONObject("data")?.optJSONArray("list") ?: JSONArray()
+        return list.toVideoSummaries()
+    }
+
     fun searchVideos(keyword: String, page: Int = 1): List<VideoSummary> {
         val params = linkedMapOf(
             "keyword" to keyword,

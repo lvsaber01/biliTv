@@ -25,6 +25,14 @@
             android:exported="false"
             android:screenOrientation="sensorLandscape" />
         <activity
+            android:name=".ui.UpProfileActivity"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape" />
+        <activity
+            android:name=".ui.FollowingActivity"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape" />
+        <activity
             android:name=".ui.LoginActivity"
             android:exported="false"
             android:screenOrientation="sensorLandscape" />

@@ -11,8 +11,8 @@ android {
         applicationId = "com.lvsaber.blblrebuild"
         minSdk = 23
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 11
+        versionName = "0.9.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -35,9 +35,11 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    testOptions { unitTests.isIncludeAndroidResources = true }
 }
 
 dependencies {
+    implementation("androidx.recyclerview:recyclerview:1.3.0")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.activity:activity-ktx:1.10.1")
@@ -48,4 +50,5 @@ dependencies {
     implementation("androidx.media3:media3-datasource:1.5.1")
     implementation("com.google.zxing:core:3.5.3")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14.1")
 }

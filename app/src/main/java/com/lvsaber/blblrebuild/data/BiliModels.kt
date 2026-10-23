@@ -12,6 +12,7 @@ data class VideoSummary(
     val views: Long,
     val likes: Long,
     val danmaku: Long,
+    val authorMid: Long = 0L,
 )
 
 data class VideoPage(
@@ -31,6 +32,86 @@ data class FavoriteFolder(
     val id: Long,
     val title: String,
     val count: Int,
+    val selected: Boolean = false,
+)
+
+data class UserProfile(
+    val mid: Long,
+    val name: String,
+    val avatarUrl: String,
+    val signature: String,
+    val verification: String = "",
+    val level: Int = 0,
+    val followerCount: Long = 0L,
+    val followingCount: Long = 0L,
+    val videoCount: Long = 0L,
+    val isFollowing: Boolean = false,
+    val liveStatus: Boolean = false,
+)
+
+data class UserVideoPage(
+    val videos: List<VideoSummary>,
+    val page: Int,
+    val pageSize: Int,
+    val total: Int,
+) {
+    val hasMore: Boolean get() = videos.isNotEmpty() && page * pageSize < total
+}
+
+data class PreviewSprite(
+    val images: List<String>,
+    val columns: Int,
+    val rows: Int,
+    val cellWidth: Int,
+    val cellHeight: Int,
+    val timestampsSeconds: List<Int>,
+) {
+    val cellsPerImage: Int get() = (columns * rows).coerceAtLeast(1)
+
+    fun frameAt(seconds: Int): PreviewFrame? {
+        if (images.isEmpty() || timestampsSeconds.isEmpty()) return null
+        val target = seconds.coerceAtLeast(0)
+        var index = 0
+        timestampsSeconds.forEachIndexed { candidate, timestamp ->
+            if (timestamp <= target) index = candidate
+        }
+        val page = index / cellsPerImage
+        val cell = index % cellsPerImage
+        if (page !in images.indices) return null
+        return PreviewFrame(images[page], cell % columns, cell / columns, cellWidth, cellHeight)
+    }
+}
+
+data class PreviewFrame(
+    val imageUrl: String,
+    val column: Int,
+    val row: Int,
+    val width: Int,
+    val height: Int,
+)
+
+data class SubtitleTrack(
+    val id: Long,
+    val language: String,
+    val label: String,
+    val url: String,
+)
+
+data class SubtitleCue(
+    val fromMs: Long,
+    val toMs: Long,
+    val content: String,
+)
+
+data class VideoChapter(
+    val startMs: Long,
+    val endMs: Long,
+    val title: String,
+)
+
+data class PlayerInfo(
+    val subtitles: List<SubtitleTrack> = emptyList(),
+    val chapters: List<VideoChapter> = emptyList(),
 )
 
 data class PlaySource(
@@ -41,6 +122,26 @@ data class PlaySource(
     val audioTrack: AudioTrack? = null,
     val isDash: Boolean = false,
     val availableAudio: List<AudioTrack> = emptyList(),
+    val availableQualities: List<PlaybackQuality> = emptyList(),
+)
+
+/**
+ * A quality returned by Bilibili for this video and account.
+ * `deviceSupported` is calculated locally and never overrides server-side
+ * login/VIP restrictions represented by [needsLogin] and [needsVip].
+ */
+data class PlaybackQuality(
+    val id: Int,
+    val label: String,
+    val width: Int = 0,
+    val height: Int = 0,
+    val codecs: List<String> = emptyList(),
+    val needsLogin: Boolean = false,
+    val needsVip: Boolean = false,
+    val isHdr: Boolean = false,
+    val isDolbyVision: Boolean = false,
+    val deviceSupported: Boolean = true,
+    val deviceReason: String? = null,
 )
 
 data class VideoTrack(
@@ -51,6 +152,12 @@ data class VideoTrack(
     val bandwidth: Int,
     val url: String,
     val backupUrls: List<String> = emptyList(),
+    val frameRate: Float = 0f,
+    val mimeType: String = "video/mp4",
+    val isHdr: Boolean = false,
+    val isDolbyVision: Boolean = false,
+    val deviceSupported: Boolean = true,
+    val deviceReason: String? = null,
 )
 
 data class AudioTrack(

@@ -35,6 +35,7 @@ object Ui {
         background = roundedBackground(blue, dp(context, 8))
         setOnClickListener { onClick() }
         isFocusable = true
+        focusHighlight(this)
     }
 
     fun chip(context: Context, label: String, selected: Boolean, onClick: () -> Unit): Button = Button(context).apply {
@@ -48,6 +49,7 @@ object Ui {
         background = roundedBackground(if (selected) blue else surfaceRaised, dp(context, 17))
         setOnClickListener { onClick() }
         isFocusable = true
+        focusHighlight(this)
     }
 
     fun text(context: Context, value: String = "", size: Float = 15f, color: Int = text): TextView = TextView(context).apply {
@@ -67,12 +69,32 @@ object Ui {
         contentDescription = null
     }
 
+    fun avatar(context: Context): AppCompatImageView = AppCompatImageView(context).apply {
+        scaleType = ImageView.ScaleType.CENTER_CROP
+        background = GradientDrawable().apply {
+            setColor(surfaceRaised)
+            shape = GradientDrawable.OVAL
+        }
+        clipToOutline = true
+        outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+        contentDescription = null
+    }
+
     fun roundedBackground(color: Int, radius: Int): GradientDrawable = GradientDrawable().apply {
         setColor(color)
         cornerRadius = radius.toFloat()
     }
 
     fun focusHighlight(view: View) {
+        val outline = GradientDrawable().apply {
+            setColor(Color.argb(35, 255, 255, 255))
+            setStroke(dp(view.context, 3), Color.WHITE)
+            cornerRadius = dp(view.context, 10).toFloat()
+        }
+        view.foreground = android.graphics.drawable.StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_focused), outline)
+            addState(intArrayOf(), android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+        }
         view.setOnFocusChangeListener { _, focused ->
             applyFocusHighlight(view, focused)
         }
@@ -84,6 +106,16 @@ object Ui {
         if (focused) view.scaleY = 1.02f else view.scaleY = 1f
         view.elevation = if (focused) dp(view.context, 8).toFloat() else 0f
     }
+
+    /** TV layout density is independent of the user's home-grid preference. */
+    fun videoColumns(context: Context, width: Int = context.resources.displayMetrics.widthPixels): Int =
+        (width / dp(context, 180)).coerceIn(4, 6)
+
+    fun railCardWidth(context: Context, width: Int): Int =
+        (width - dp(context, 16)) / videoColumns(context, width) - dp(context, 8)
+
+    fun cardHeight(context: Context, width: Int): Int =
+        (width - dp(context, 12)) * 9 / 16 + dp(context, 72)
 
     private class PosterImageView(context: Context) : AppCompatImageView(context) {
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {

@@ -81,26 +81,26 @@ object ChannelCatalog {
         // Keep the original eight keys and existing topic0..topic2 meanings stable.
         channel("animation", "动画", "▶", 1005, 1, oldTopics("同人动画", "动漫剪辑", "动漫评论") + listOf(
             ChannelTopic("mad_amv", "MAD·AMV"), ChannelTopic("anime_goods", "模玩周边"),
-        )),
+        ), rankingRefererSlug = "douga"),
         channel("game", "游戏", "✚", 1008, 4, oldTopics("单机游戏", "手机游戏", "电子竞技") + listOf(
             ChannelTopic("online_games", "网络游戏"), ChannelTopic("game_guides", "攻略/试玩"),
-        )),
+        ), rankingRefererSlug = "game"),
         channel("knowledge", "知识", "◇", 1010, 36, oldTopics("科学科普", "人文历史", "财经") + listOf(
             ChannelTopic("social_science", "社科/法律/心理"), ChannelTopic("campus_learning", "校园学习"),
-        )),
+        ), rankingRefererSlug = "knowledge"),
         channel("digital", "科技数码", "▣", 1012, 188, oldTopics("手机评测", "电脑", "摄影") + listOf(
             ChannelTopic("software_apps", "软件应用"), ChannelTopic("geek_diy", "极客 DIY"),
-        )),
+        ), rankingRefererSlug = "tech"),
         channel("music", "音乐", "♫", 1003, 3, oldTopics("翻唱", "演奏", "音乐现场") + listOf(
             ChannelTopic("original_music", "原创音乐"), ChannelTopic("vocaloid", "VOCALOID"),
-        )),
+        ), rankingRefererSlug = "music"),
         channel("food", "美食", "♨", 1020, 211, oldTopics("家常菜", "探店", "烘焙") + listOf(
             ChannelTopic("food_vlog", "美食记录"), ChannelTopic("food_review", "美食测评"),
-        )),
+        ), rankingRefererSlug = "food"),
         channel("dance", "舞蹈", "♪", 1004, 129, listOf(
             ChannelTopic("otaku_dance", "宅舞"), ChannelTopic("street_dance", "街舞"),
             ChannelTopic("chinese_dance", "国风舞蹈"), ChannelTopic("dance_tutorial", "舞蹈教学/翻跳"),
-        )),
+        ), rankingRefererSlug = "dance"),
         channel("life", "生活兴趣", "☆", 1030, 160, listOf(
             ChannelTopic("handmade", "手工"), ChannelTopic("life_skills", "生活技能/野生技能"),
             ChannelTopic("collectibles", "模玩潮玩"), ChannelTopic("leisure", "休闲玩乐"),
@@ -109,11 +109,11 @@ object ChannelCatalog {
 
         channel("film", "影视", "▣", 1001, 181, listOf(
             ChannelTopic("film_editing", "影视剪辑"), ChannelTopic("film_chat", "影视杂谈"), ChannelTopic("short_films", "短剧/短片"),
-        )),
+        ), rankingRefererSlug = "cinephile"),
         channel("entertainment", "娱乐", "✦", 1002, 5, listOf(
             ChannelTopic("entertainment_chat", "娱乐杂谈"), ChannelTopic("celebrities", "明星综合"),
             ChannelTopic("variety_shows", "综艺"), ChannelTopic("fan_stages", "粉丝创作/舞台"),
-        )),
+        ), rankingRefererSlug = "ent"),
         channel("painting", "绘画", "✎", 1006, 162, listOf(
             ChannelTopic("anime_art", "二次元绘画"), ChannelTopic("general_art", "非二次元绘画"),
             ChannelTopic("art_tutorial", "绘画教程"), ChannelTopic("art_process", "绘画过程"),
@@ -121,7 +121,7 @@ object ChannelCatalog {
         channel("kuso", "鬼畜", "♬", 1007, 119, listOf(
             ChannelTopic("kuso_theater", "鬼畜剧场"), ChannelTopic("kuso_remix", "鬼畜调教"),
             ChannelTopic("音mad", "音 MAD"), ChannelTopic("human_vocaloid", "人力 VOCALOID"),
-        )),
+        ), rankingRefererSlug = "kichiku"),
         channel("news", "资讯", "▤", 1009, 202, listOf(
             ChannelTopic("social_news", "社会资讯"), ChannelTopic("current_affairs", "时政资讯"),
             ChannelTopic("world_news", "国际观察"),
@@ -134,11 +134,11 @@ object ChannelCatalog {
             ChannelTopic("car_life", "汽车生活"), ChannelTopic("new_energy", "新能源车"),
             ChannelTopic("car_buying", "购车攻略"), ChannelTopic("motorsport", "赛车"),
             ChannelTopic("car_knowledge", "汽车知识"),
-        )),
+        ), rankingRefererSlug = "car"),
         channel("fashion", "时尚美妆", "❋", 1014, 155, listOf(
             ChannelTopic("beauty_skincare", "美妆护肤"), ChannelTopic("outfits", "穿搭"),
             ChannelTopic("fashion_trends", "时尚潮流"), ChannelTopic("cosplay_makeup", "仿妆 COS"),
-        )),
+        ), rankingRefererSlug = "fashion"),
         channel("home_living", "家装房产", "⌂", 1015, 239, listOf(
             ChannelTopic("home_renovation", "家庭装修"), ChannelTopic("interiors", "家居展示"),
             ChannelTopic("home_appliances", "家电"), ChannelTopic("housing", "买房租房"),
@@ -156,7 +156,7 @@ object ChannelCatalog {
             ChannelTopic("football", "足球"), ChannelTopic("basketball", "篮球"),
             ChannelTopic("sports_events", "竞技赛事"), ChannelTopic("running", "跑步"),
             ChannelTopic("sports_general", "运动综合"),
-        )),
+        ), rankingRefererSlug = "sports"),
         channel("handcraft", "手工", "✿", 1019, 161, listOf(
             ChannelTopic("traditional_crafts", "传统手工艺"), ChannelTopic("light_crafts", "轻手作"),
             ChannelTopic("journaling", "文具手帐"), ChannelTopic("toy_diy", "DIY 玩具"),
@@ -179,7 +179,7 @@ object ChannelCatalog {
             ChannelTopic("cats", "猫"), ChannelTopic("dogs", "狗"),
             ChannelTopic("small_pets", "小宠异宠"), ChannelTopic("wildlife", "野生动物科普"),
             ChannelTopic("animal_fanworks", "动物二创"),
-        )),
+        ), rankingRefererSlug = "animal"),
         channel("parenting", "亲子", "♡", 1025, 254, listOf(
             ChannelTopic("family_play", "亲子互动"), ChannelTopic("kids", "萌娃"),
             ChannelTopic("parenting_education", "亲子教育"), ChannelTopic("pregnancy_baby", "孕婴护理"),

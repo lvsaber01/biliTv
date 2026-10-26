@@ -19,6 +19,9 @@ import kotlin.math.max
 class BiliApiClient(context: Context) {
     private val credentialStore = CredentialStore(context.applicationContext)
     @Volatile private var wbiKeys: Pair<String, String>? = null
+    @Volatile private var rankingFingerprintCookie: String? = null
+    private var rankingFingerprintFetched = false
+    private val rankingFingerprintLock = Any()
     private val rankingCache = ConcurrentHashMap<Int, List<VideoSummary>>()
 
     fun getPopularVideos(page: Int = 1, pageSize: Int = 20): List<VideoSummary> {
@@ -79,16 +82,40 @@ class BiliApiClient(context: Context) {
 
     private fun loadRanking(rid: Int, refererSlug: String?): List<VideoSummary> {
         val params = mapOf("rid" to rid.toString(), "type" to "all", "web_location" to "333.934")
-        val root = try {
-            get("/x/web-interface/ranking/v2", params, HOME_REFERER)
-        } catch (error: BiliApiException) {
-            if (error.apiCode != -352) throw error
-            val path = refererSlug?.takeIf { it.matches(Regex("[a-zA-Z0-9_-]+")) } ?: "all"
-            get("/x/web-interface/ranking/v2", params, "$RANKING_REFERER_PREFIX$path")
+        val cookie = rankingCookie()
+        var root: JSONObject? = null
+        var blockedError: BiliApiException? = null
+        for (referer in RankingRequestPolicy.refererAttempts(refererSlug)) {
+            try {
+                root = get("/x/web-interface/ranking/v2", params, referer, cookie)
+                break
+            } catch (error: BiliApiException) {
+                if (error.apiCode != -352) throw error
+                blockedError = error
+            }
         }
-        val data = root.optJSONObject("data") ?: throw BiliApiException(-500, "排行榜数据为空")
+        val response = root ?: throw (blockedError ?: BiliApiException(-500, "排行榜请求未完成"))
+        val data = response.optJSONObject("data") ?: throw BiliApiException(-500, "排行榜数据为空")
         val list = data.optJSONArray("list") ?: throw BiliApiException(-500, "排行榜列表缺失")
         return list.toVideoSummaries()
+    }
+
+    /** Ranking is anonymous, but Bilibili's current risk checks may still require device cookies. */
+    private fun rankingCookie(): String? {
+        val accountCookie = credentialStore.readCookie()
+        if (RankingCookiePolicy.containsDeviceId(accountCookie)) return accountCookie
+        val anonymousCookie = rankingFingerprintCookie ?: synchronized(rankingFingerprintLock) {
+            if (!rankingFingerprintFetched) {
+                rankingFingerprintFetched = true
+                rankingFingerprintCookie = runCatching {
+                    val data = get("/x/frontend/finger/spi", emptyMap(), HOME_REFERER, cookie = null)
+                        .optJSONObject("data") ?: return@runCatching null
+                    RankingCookiePolicy.fromFingerprint(data.optString("b_3"), data.optString("b_4"))
+                }.getOrNull()
+            }
+            rankingFingerprintCookie
+        }
+        return RankingCookiePolicy.merge(accountCookie, anonymousCookie)
     }
 
     fun searchVideos(keyword: String, page: Int = 1, pageSize: Int = 20, tid: Int? = null): List<VideoSummary> {
@@ -789,8 +816,13 @@ class BiliApiClient(context: Context) {
         ?.substringAfter('=')?.takeIf { it.isNotBlank() }
         ?: throw BiliApiException(-111, "登录 Cookie 缺少 CSRF，需重新扫码登录")
 
-    private fun get(path: String, params: Map<String, String>, referer: String = HOME_REFERER): JSONObject {
-        val response = requestRoot(path, params, referer)
+    private fun get(
+        path: String,
+        params: Map<String, String>,
+        referer: String? = HOME_REFERER,
+        cookie: String? = credentialStore.readCookie(),
+    ): JSONObject {
+        val response = requestRoot(path, params, referer, cookie)
         val code = response.optInt("code", 0)
         if (code != 0) {
             throw BiliApiException(code, response.optString("message", "Bilibili API error"))
@@ -819,9 +851,10 @@ class BiliApiClient(context: Context) {
     private fun requestRoot(
         path: String,
         params: Map<String, String> = emptyMap(),
-        referer: String = HOME_REFERER,
+        referer: String? = HOME_REFERER,
+        cookie: String? = credentialStore.readCookie(),
     ): JSONObject {
-        return requestRoot(BASE_URL, path, params, credentialStore.readCookie(), referer)
+        return requestRoot(BASE_URL, path, params, cookie, referer)
     }
 
     private fun postForm(path: String, params: Map<String, String>): JSONObject {
@@ -854,7 +887,7 @@ class BiliApiClient(context: Context) {
         path: String,
         params: Map<String, String>,
         cookie: String? = credentialStore.readCookie(),
-        referer: String = HOME_REFERER,
+        referer: String? = HOME_REFERER,
     ): JSONObject {
         val query = params.entries.joinToString("&") { "${encode(it.key)}=${encode(it.value)}" }
         val url = if (query.isBlank()) "$baseUrl$path" else "$baseUrl$path?$query"
@@ -873,7 +906,7 @@ class BiliApiClient(context: Context) {
     private fun openConnection(
         url: String,
         cookie: String? = credentialStore.readCookie(),
-        referer: String = HOME_REFERER,
+        referer: String? = HOME_REFERER,
     ): HttpURLConnection {
         val connection = URL(url).openConnection() as HttpURLConnection
         connection.connectTimeout = 15_000
@@ -881,7 +914,7 @@ class BiliApiClient(context: Context) {
         connection.requestMethod = "GET"
         connection.setRequestProperty("Accept", "application/json, text/plain, */*")
         connection.setRequestProperty("User-Agent", USER_AGENT)
-        connection.setRequestProperty("Referer", referer)
+        referer?.let { connection.setRequestProperty("Referer", it) }
         connection.setRequestProperty("Origin", "https://www.bilibili.com")
         connection.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
         connection.setRequestProperty("Sec-Fetch-Site", "same-site")
@@ -998,7 +1031,6 @@ class BiliApiClient(context: Context) {
         private val DASH_QUALITY_IDS = setOf(74, 100, 112, 116, 120, 125, 126, 127, 129)
         private val HDR_QUALITY_IDS = setOf(125, 126, 129)
         private const val HOME_REFERER = "https://www.bilibili.com/"
-        private const val RANKING_REFERER_PREFIX = "https://www.bilibili.com/v/popular/rank/"
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 13; Tablet) AppleWebKit/537.36 " +
                 "Chrome/131.0.0.0 Mobile Safari/537.36"

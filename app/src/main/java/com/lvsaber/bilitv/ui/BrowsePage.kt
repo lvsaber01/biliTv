@@ -20,6 +20,7 @@ import androidx.media3.common.util.UnstableApi
 import com.lvsaber.bilitv.core.AppExecutors
 import com.lvsaber.bilitv.data.AppSettings
 import com.lvsaber.bilitv.data.BiliApiClient
+import com.lvsaber.bilitv.data.BiliApiException
 import com.lvsaber.bilitv.data.BrowseRail
 import com.lvsaber.bilitv.data.BrowseSource
 import com.lvsaber.bilitv.data.ChannelCatalog
@@ -310,7 +311,7 @@ class BrowsePage(
                         return@post
                     }
                     if (result.successfulPages == 0 && result.error != null) {
-                        rail.error = "加载失败，按确定或重试"
+                        rail.error = failureStatus(result.error)
                         rail.failedReset = reset
                         if (!reset && rail.revealWhenReady && rail.buffer.availableCount > 0) {
                             reveal(rail, focusNew = rail.focusAfterReveal)
@@ -354,7 +355,7 @@ class BrowsePage(
                         rail.buffer.exhausted = result.exhausted
                         if (rail.revealWhenReady) reveal(rail, focusNew = rail.focusAfterReveal)
                     }
-                    rail.error = result.error?.let { "部分内容已加载，按确定重试" }
+                    rail.error = result.error?.let { failureStatus(it, partial = true) }
                     rail.failedReset = false
                     if (reset) restoreRefreshFocus(rail)
                     rail.focusAfterReveal = false
@@ -456,6 +457,13 @@ class BrowsePage(
         }
         rail.retry.visibility = if (rail.error != null) VISIBLE else GONE
         rail.status.isFocusable = rail.items.isEmpty()
+    }
+
+    private fun failureStatus(error: Throwable, partial: Boolean = false): String {
+        val apiError = generateSequence(error) { it.cause }.filterIsInstance<BiliApiException>().firstOrNull()
+        val detail = apiError?.let { "API ${it.apiCode}" } ?: "网络错误"
+        val prefix = if (partial) "部分加载" else "加载失败"
+        return "$prefix · $detail · 确定重试"
     }
 
     private fun focusEmptyStatusIfPending(rail: Rail) {

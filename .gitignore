@@ -6,6 +6,13 @@ build/
 local.properties
 .idea/
 *.iml
+# Release signing material is private and must never be committed.
+*.jks
+*.keystore
+*.p12
+keystore.properties
+release-signing.properties
+release-password.txt
 # Local API investigations and other working artifacts.
 /analysis/
 # Internal product design, API research, and device test plans stay local.
@@ -15,4 +22,5 @@ local.properties
 **/src/androidTest/
 *.apk
 *.aab
+branding/*.zip
 .DS_Store

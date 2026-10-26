@@ -1,16 +1,38 @@
 import com.android.build.gradle.internal.api.BaseVariantOutputImpl
+import java.io.File
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
 
+// Local release builds provide paths only; the password stays outside the Git checkout.
+val releaseStoreFile = System.getenv("BILITV_RELEASE_STORE_FILE")?.takeIf { it.isNotBlank() }
+val releasePasswordFilePath = System.getenv("BILITV_RELEASE_PASSWORD_FILE")?.takeIf { it.isNotBlank() }
+val releasePassword = releasePasswordFilePath
+    ?.let { File(it) }
+    ?.takeIf { it.isFile }
+    ?.readText()
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }
+val releaseKeyAlias = System.getenv("BILITV_RELEASE_KEY_ALIAS")?.takeIf { it.isNotBlank() }
+val releaseSigningValues = listOf(
+    releaseStoreFile,
+    releasePasswordFilePath,
+    releasePassword,
+    releaseKeyAlias,
+)
+val releaseSigningConfigured = releaseSigningValues.all { it != null }
+if (releaseSigningValues.any { it != null } && !releaseSigningConfigured) {
+    throw GradleException("Release signing environment is incomplete; provide all BILITV_RELEASE_* values.")
+}
+
 android {
-    namespace = "com.lvsaber.blblrebuild"
+    namespace = "com.lvsaber.bilitv"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.lvsaber.blblrebuild"
+        applicationId = "com.lvsaber.bilitv"
         minSdk = 23
         targetSdk = 35
         versionCode = 18
@@ -19,8 +41,23 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    if (releaseSigningConfigured) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(requireNotNull(releaseStoreFile))
+                storePassword = requireNotNull(releasePassword)
+                keyAlias = requireNotNull(releaseKeyAlias)
+                keyPassword = requireNotNull(releasePassword)
+                storeType = "PKCS12"
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

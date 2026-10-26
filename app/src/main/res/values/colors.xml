@@ -1,6 +1,10 @@
 <resources>
-    <color name="blbl_blue">#00AEEC</color>
+    <color name="blbl_blue">#00A1D6</color>
     <color name="blbl_blue_dark">#0088B8</color>
+    <color name="bili_brand_blue">#00A1D6</color>
+    <color name="bili_brand_pink">#FB7299</color>
+    <color name="bili_brand_ink">#173C50</color>
+    <color name="launcher_icon_background">#FFF8F4</color>
     <color name="blbl_background">#101216</color>
     <color name="blbl_surface">#1B1F26</color>
     <color name="blbl_text">#F3F5F7</color>

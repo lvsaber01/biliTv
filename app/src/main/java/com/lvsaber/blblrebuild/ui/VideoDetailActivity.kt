@@ -87,14 +87,18 @@ class VideoDetailActivity : AppCompatActivity() {
         val hero = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             background = Ui.panel(context)
-            setPadding(Ui.dp(context, 12), Ui.dp(context, 12), Ui.dp(context, 12), Ui.dp(context, 12))
+            setPadding(Ui.dp(context, 14), Ui.dp(context, 14), Ui.dp(context, 14), Ui.dp(context, 14))
         }
         val poster = Ui.poster(this)
-        hero.addView(poster, LinearLayout.LayoutParams(resources.displayMetrics.widthPixels / 4, ViewGroup.LayoutParams.WRAP_CONTENT))
+        // LayoutParams are in dp. Weight the poster against the measured hero
+        // width instead of feeding physical display pixels into a dp slot.
+        hero.addView(poster, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.34f).apply {
+            marginEnd = Ui.dp(this@VideoDetailActivity, 14)
+        })
         CoverLoader.load(poster, summary.coverUrl)
         val info = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(Ui.dp(context, 18), 0, Ui.dp(context, 4), 0)
+            setPadding(0, 0, 0, 0)
         }
         info.addView(Ui.text(this, summary.title, 18f, Ui.text).apply {
             maxLines = 2
@@ -110,23 +114,41 @@ class VideoDetailActivity : AppCompatActivity() {
             }
         }.apply {
             gravity = Gravity.START or Gravity.CENTER_VERTICAL
-            setPadding(0, 0, Ui.dp(context, 12), 0)
+            setPadding(Ui.dp(context, 12), 0, Ui.dp(context, 12), 0)
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
         }
         upButton = authorButton
         info.addView(authorButton, LinearLayout.LayoutParams(-1, Ui.dp(this, 40)))
-        // Keep the author action on the top navigation row so the existing
-        // play/library/episode focus rhythm remains stable on a remote.
-        focusRows[0] = listOf(back, authorButton)
-        info.addView(Ui.text(this, "${summary.bvid}  ·  ${summary.duration}", 13f, Ui.muted).apply { setPadding(0, 0, 0, Ui.dp(context, 6)) })
+        // Keep remote navigation aligned with the actual visual rows: DPAD_UP
+        // from playback goes straight to the UP action above it.
+        focusRows += listOf(authorButton)
+        info.addView(Ui.text(this, "${summary.bvid}  ·  ${summary.duration}", 13f, Ui.muted).apply {
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(0, 0, 0, Ui.dp(context, 6))
+        })
         info.addView(Ui.text(this, "播放 ${formatCount(summary.views)}   弹幕 ${formatCount(summary.danmaku)}   点赞 ${formatCount(summary.likes)}", 13f, Ui.muted).apply {
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
             setPadding(0, 0, 0, Ui.dp(context, 10))
         })
         val actions = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         val primary = Ui.button(this, "播放") { launch(detail) }
+        primary.minWidth = 0
+        primary.isSingleLine = true
+        primary.ellipsize = android.text.TextUtils.TruncateAt.END
         playButton = primary
         val restart = Ui.chip(this, "从头播放", false) { launch(detail, detail.pages.firstOrNull()?.cid, true) }
-        actions.addView(primary, LinearLayout.LayoutParams(0, Ui.dp(this, 46), 1f))
-        actions.addView(restart, LinearLayout.LayoutParams(-2, Ui.dp(this, 46)).apply { marginStart = Ui.dp(this@VideoDetailActivity, 10) })
+        restart.minWidth = 0
+        restart.isSingleLine = true
+        restart.ellipsize = android.text.TextUtils.TruncateAt.END
+        actions.addView(primary, LinearLayout.LayoutParams(0, Ui.dp(this, 46), 1f).apply {
+            marginEnd = Ui.dp(this@VideoDetailActivity, 6)
+        })
+        actions.addView(restart, LinearLayout.LayoutParams(0, Ui.dp(this, 46), 1f).apply {
+            marginStart = Ui.dp(this@VideoDetailActivity, 6)
+        })
         info.addView(actions)
         focusRows += listOf(primary, restart)
         val libraryActions = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
@@ -134,6 +156,8 @@ class VideoDetailActivity : AppCompatActivity() {
         val favorite = Ui.chip(this, "收藏", false) { showFavoriteChooser(summary) }
         watchLaterButton = watchLater
         favoriteButton = favorite
+        watchLater.minWidth = 0
+        favorite.minWidth = 0
         libraryActions.addView(watchLater, LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1f))
         libraryActions.addView(favorite, LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1f).apply { marginStart = Ui.dp(this@VideoDetailActivity, 10) })
         info.addView(libraryActions, LinearLayout.LayoutParams(-1, Ui.dp(this, 48)).apply { topMargin = Ui.dp(this@VideoDetailActivity, 8) })

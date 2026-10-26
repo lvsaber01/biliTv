@@ -2,7 +2,6 @@ package com.lvsaber.blblrebuild.ui
 
 import android.content.Context
 import android.graphics.Color
-import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -17,7 +16,6 @@ import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
 import com.lvsaber.blblrebuild.data.WatchProgress
-import com.lvsaber.blblrebuild.data.PreviewSprite
 import com.lvsaber.blblrebuild.R
 
 /** One owner for visibility, focus, transport keys and touch scrubbing. No player/network ownership. */
@@ -43,19 +41,13 @@ class PlaybackControls(
     private var seekKey = 0
     private var lastSeekStep = 0L
     private var fading = false
-    private var previewSource: PreviewSprite? = null
-    private var previewLoader: ((PreviewSprite, Int, Int, (Bitmap?) -> Unit) -> Unit)? = null
-    private var previewRequest = 0
-    private var lastPreviewSecond = -1
     private val hideTask = Runnable { hideControls() }
     private val commitTask = Runnable { commitSeek() }
     private val playButton: Button
     private val progress: SeekBar
     private val time: TextView
     private val hint: TextView
-    private val previewCard: LinearLayout
-    private val previewImage: android.widget.ImageView
-    private val previewTime: TextView
+    private lateinit var bottomPanel: LinearLayout
     var controlsVisible = true
         private set
 
@@ -73,29 +65,6 @@ class PlaybackControls(
         }, LinearLayout.LayoutParams(-1, Ui.dp(context, 50)))
         addView(heading, LayoutParams(-1, -2, Gravity.TOP))
 
-        previewImage = android.widget.ImageView(context).apply {
-            scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
-            background = Ui.roundedBackground(Color.BLACK, Ui.dp(context, 8))
-        }
-        previewTime = Ui.text(context, "", 14f, Color.WHITE).apply {
-            gravity = Gravity.CENTER
-            setBackgroundColor(0xAA0B0E12.toInt())
-            setPadding(Ui.dp(context, 8), 0, Ui.dp(context, 8), 0)
-        }
-        previewCard = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(Ui.dp(context, 6), Ui.dp(context, 6), Ui.dp(context, 6), Ui.dp(context, 4))
-            background = Ui.roundedBackground(Ui.surface, Ui.dp(context, 10))
-            isFocusable = false
-            visibility = GONE
-            addView(previewImage, LinearLayout.LayoutParams(Ui.dp(context, 300), Ui.dp(context, 170)))
-            addView(previewTime, LinearLayout.LayoutParams(-1, Ui.dp(context, 28)))
-        }
-        addView(previewCard, LayoutParams(Ui.dp(context, 320), Ui.dp(context, 214), Gravity.CENTER).apply {
-            bottomMargin = Ui.dp(context, 138)
-        })
-
         val transport = LinearLayout(context).apply { gravity = Gravity.CENTER }
         transport.addView(Ui.chip(context, "↶ 10 秒", false) { stepSeek(-1); commitSeek() })
         playButton = Ui.chip(context, "暂停", false) { performToggle() }.apply {
@@ -109,13 +78,13 @@ class PlaybackControls(
         transport.addView(Ui.chip(context, "10 秒 ↷", false) { stepSeek(1); commitSeek() })
         addView(transport, LayoutParams(-2, -2, Gravity.CENTER))
 
-        val bottom = LinearLayout(context).apply {
+        bottomPanel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(Ui.dp(context, 18), Ui.dp(context, 8), Ui.dp(context, 18), Ui.dp(context, 12))
             setBackgroundColor(0xCC0B0E12.toInt())
         }
         hint = Ui.text(context, "左右快退/快进 10 秒 · 确认播放/暂停 · 上键设置 · 返回隐藏", 13f, Ui.muted)
-        bottom.addView(hint)
+        bottomPanel.addView(hint)
         progress = SeekBar(context).apply {
             tag = "playback-progress"
             max = 10000
@@ -136,10 +105,10 @@ class PlaybackControls(
                 }
             })
         }
-        bottom.addView(progress, LinearLayout.LayoutParams(-1, Ui.dp(context, 36)))
+        bottomPanel.addView(progress, LinearLayout.LayoutParams(-1, Ui.dp(context, 36)))
         time = Ui.text(context, "00:00 / --:--", 15f, Color.WHITE)
-        bottom.addView(time)
-        addView(bottom, LayoutParams(-1, -2, Gravity.BOTTOM))
+        bottomPanel.addView(time)
+        addView(bottomPanel, LayoutParams(-1, -2, Gravity.BOTTOM))
     }
 
     fun update(position: Long, duration: Long, isPlaying: Boolean, isReady: Boolean) {
@@ -153,12 +122,6 @@ class PlaybackControls(
         renderProgress()
     }
 
-    fun setPreviewSource(source: PreviewSprite?, loader: ((PreviewSprite, Int, Int, (Bitmap?) -> Unit) -> Unit)? = null) {
-        previewSource = source
-        previewLoader = loader
-        lastPreviewSecond = -1
-    }
-
     private fun renderProgress() {
         val value = seekTarget ?: positionMs
         time.text = context.getString(R.string.playback_time, WatchProgress.formatPosition(value), if (durationMs > 0) WatchProgress.formatPosition(durationMs) else "--:--")
@@ -166,27 +129,6 @@ class PlaybackControls(
         progress.isEnabled = ready && durationMs > 0
         if (!dragging) progress.progress = if (durationMs > 0) (value * 10000 / durationMs).toInt().coerceIn(0, 10000) else 0
         hint.text = if (seekTarget != null) "定位到 ${WatchProgress.formatPosition(value)} · 松开方向键跳转" else "左右快退/快进 10 秒 · 确认播放/暂停 · 上键设置 · 返回隐藏"
-        renderPreview(value)
-    }
-
-    private fun renderPreview(value: Long) {
-        val target = seekTarget
-        if (target == null || !controlsVisible) {
-            previewCard.visibility = GONE
-            return
-        }
-        previewCard.visibility = VISIBLE
-        val delta = target - positionMs
-        previewTime.text = "${WatchProgress.formatPosition(target)}  ·  ${if (delta >= 0) "+" else "-"}${WatchProgress.formatPosition(kotlin.math.abs(delta))}"
-        val source = previewSource ?: return
-        val loader = previewLoader ?: return
-        val second = (target / 1000).toInt()
-        if (second == lastPreviewSecond) return
-        lastPreviewSecond = second
-        val request = ++previewRequest
-        loader(source, second, Ui.dp(context, 300)) { bitmap ->
-            if (request == previewRequest && bitmap != null && seekTarget != null) previewImage.setImageBitmap(bitmap)
-        }
     }
 
     private fun resetHideTimer() {
@@ -207,7 +149,6 @@ class PlaybackControls(
         handler.removeCallbacks(hideTask)
         if (!controlsVisible) return
         controlsVisible = false
-        previewCard.visibility = GONE
         descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         clearFocus(); focusVideo()
         fading = true
@@ -237,9 +178,6 @@ class PlaybackControls(
         handler.removeCallbacks(commitTask)
         val target = seekTarget ?: return
         seekTarget = null; seekKey = 0
-        previewRequest++
-        lastPreviewSecond = -1
-        previewCard.visibility = GONE
         positionMs = target
         seekPlayback(target)
         renderProgress(); resetHideTimer()

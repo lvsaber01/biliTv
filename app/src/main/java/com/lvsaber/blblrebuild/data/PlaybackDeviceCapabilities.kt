@@ -1,7 +1,7 @@
 package com.lvsaber.blblrebuild.data
 
 import android.content.Context
-import android.graphics.Point
+import android.media.MediaFormat
 import android.media.MediaCodecList
 import android.os.Build
 import android.view.Display
@@ -21,6 +21,8 @@ data class PlaybackDeviceCapabilities(
     val supportedHdrTypes: Set<Int> = emptySet(),
     val codecLimits: Map<PlaybackCodec, CodecPlaybackLimit> = emptyMap(),
     val probeAvailable: Boolean = true,
+    /** Enabled only for runtime detection; tests and synthetic capabilities stay deterministic. */
+    val formatProbeEnabled: Boolean = false,
 ) {
     fun supports(quality: PlaybackQuality): DeviceSupport {
         val width = quality.width.takeIf { it > 0 } ?: quality.inferredWidth()
@@ -76,6 +78,9 @@ data class PlaybackDeviceCapabilities(
         if (codec != null && supportedCodecs.isNotEmpty() && codec !in supportedCodecs) {
             return DeviceSupport(false, "设备未声明支持 ${codec.label}")
         }
+        if (formatProbeEnabled && codec != null && !findDecoderFor(track, codec)) {
+            return DeviceSupport(false, "系统解码器不接受该编码/规格")
+        }
         if (probeAvailable && track.isDolbyVision &&
             Display.HdrCapabilities.HDR_TYPE_DOLBY_VISION !in supportedHdrTypes
         ) {
@@ -126,7 +131,6 @@ data class PlaybackDeviceCapabilities(
     companion object {
         fun detect(context: Context): PlaybackDeviceCapabilities {
             val display = displayOf(context)
-            val displaySize = displaySize(display)
             var decoderWidth = 0
             var decoderHeight = 0
             var decoderFrameRate = 0f
@@ -139,6 +143,11 @@ data class PlaybackDeviceCapabilities(
                     .forEach { codecInfo ->
                         for (mime in codecInfo.supportedTypes.filter { it.startsWith("video/", ignoreCase = true) }) {
                             val codec = PlaybackCodec.fromMimeType(mime) ?: continue
+                            // Android TV devices may expose a generic software AV1 decoder
+                            // (for example c2.android.av1.decoder). It is not a reliable
+                            // signal that the TV box can play Bilibili AV1 at high bitrate,
+                            // so only advertise AV1 when a vendor/hardware decoder exists.
+                            if (codec == PlaybackCodec.AV1 && codecInfo.isSoftwareDecoder()) continue
                             val caps = codecInfo.getCapabilitiesForType(mime)
                             val video = caps.videoCapabilities ?: continue
                             codecs += codec
@@ -155,8 +164,12 @@ data class PlaybackDeviceCapabilities(
                     }
             }
 
-            val maxWidth = limitByDisplay(decoderWidth, displaySize.x)
-            val maxHeight = limitByDisplay(decoderHeight, displaySize.y)
+            // Display modes describe the output surface and are not a decoder limit.
+            // Shield can report a conservative/current output mode here even though its
+            // video decoder accepts 1080p/4K input. Use codec capabilities for filtering;
+            // Media3 will scale the decoded frame to the actual output surface.
+            val maxWidth = decoderWidth
+            val maxHeight = decoderHeight
             val hdrTypes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 display?.hdrCapabilities?.supportedHdrTypes?.toSet().orEmpty()
             } else {
@@ -170,6 +183,7 @@ data class PlaybackDeviceCapabilities(
                 supportedHdrTypes = hdrTypes,
                 codecLimits = codecLimits,
                 probeAvailable = true,
+                formatProbeEnabled = true,
             )
         }
 
@@ -184,24 +198,35 @@ data class PlaybackDeviceCapabilities(
             return (context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)?.defaultDisplay
         }
 
-        private fun displaySize(display: Display?): Point {
-            if (display == null) return Point(0, 0)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                val modes = display.supportedModes
-                val mode = modes.maxByOrNull { it.physicalWidth.toLong() * it.physicalHeight }
-                if (mode != null) return Point(mode.physicalWidth, mode.physicalHeight)
-            }
-            val point = Point()
-            @Suppress("DEPRECATION")
-            display.getRealSize(point)
-            return point
+        private fun android.media.MediaCodecInfo.isSoftwareDecoder(): Boolean {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && isSoftwareOnly) return true
+            val normalized = name.lowercase()
+            return normalized.startsWith("omx.google.") ||
+                normalized.startsWith("omx.android.") ||
+                normalized.startsWith("c2.android.") ||
+                normalized.startsWith("c2.google.")
         }
 
-        private fun limitByDisplay(decoderLimit: Int, displayLimit: Int): Int = when {
-            decoderLimit <= 0 -> displayLimit
-            displayLimit <= 0 -> decoderLimit
-            else -> min(decoderLimit, displayLimit)
-        }
+        private fun findDecoderFor(track: VideoTrack, codec: PlaybackCodec): Boolean = runCatching {
+            val mime = when (codec) {
+                PlaybackCodec.AVC -> "video/avc"
+                PlaybackCodec.HEVC -> "video/hevc"
+                PlaybackCodec.AV1 -> "video/av01"
+            }
+            val width = track.width.takeIf { it > 0 } ?: 1920
+            val height = track.height.takeIf { it > 0 } ?: 1080
+            val format = MediaFormat.createVideoFormat(mime, width, height)
+            if (track.frameRate > 0f) format.setFloat(MediaFormat.KEY_FRAME_RATE, track.frameRate)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && track.codecs.isNotBlank()) {
+                format.setString(MediaFormat.KEY_CODECS_STRING, track.codecs)
+            }
+            val decoder = MediaCodecList(MediaCodecList.REGULAR_CODECS).findDecoderForFormat(format) ?: return@runCatching false
+            if (codec == PlaybackCodec.AV1) {
+                val name = decoder.lowercase()
+                !name.startsWith("omx.google.") && !name.startsWith("omx.android.") &&
+                    !name.startsWith("c2.android.") && !name.startsWith("c2.google.")
+            } else true
+        }.getOrDefault(true)
     }
 }
 

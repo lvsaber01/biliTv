@@ -1,6 +1,6 @@
 # biliTv
 
-当前版本：`0.9.0`
+当前版本：`0.11.0`
 
 这是一个基于 `source/BBLL1.5.2.apk` 的独立重建项目。目标不是恢复原始工程，而是使用 REA 对 APK 做静态证据分析后，重新实现一个可以直接构建和使用的 Android / Android TV Bilibili 客户端。
 
@@ -28,9 +28,11 @@
 - 关键词搜索与 BV 号直达
 - 视频详情、作者/统计信息、多 P 选择
 - Media3 播放器：MP4 兼容模式或 DASH 分离音视频模式，自动携带 CDN 所需 Referer、Origin 和 User-Agent
+- 播放线路管理：主/备用 CDN 自动切换、手动选线、失败后刷新签名播放地址，保持播放进度和播放状态
+- 网络诊断：显示当前网络、首帧、缓冲、切线和最近错误；可对当前视频线路执行限流量 Range 探测，不保存签名 URL
 - 设置页支持首页样式、轨道管理、默认分辨率、默认视频编码、MP4/DASH、弹幕开关
-- 播放画质按服务端实际返回的 360P–8K、60 帧、HDR、Dolby Vision 和 AV1 轨道动态展示，并结合当前设备的解码器、显示能力和帧率过滤；支持关闭自动过滤后手动尝试实验性高规格
-- 播放页支持画质、编码、音轨、倍速、弹幕和设置快捷入口
+- 播放画质按服务端实际返回的 360P–8K、60 帧、HDR、Dolby Vision 和多编码轨道动态展示，并结合当前设备的解码器和帧率过滤；播放页只选择分辨率，编码在设置中按自动 H.264 → H.265 → AV1 或指定编码管理
+- 播放页支持画质、音轨、倍速、弹幕和设置快捷入口
 - 播放器支持遥控器定位预览、字幕覆盖层、章节/看点跳转、画面比例和当前线路诊断；定位预览按需加载 B 站快照雪碧图
 - 登录后详情页支持添加稍后再看和多选收藏夹，个人中心新增稍后再看入口；稍后再看卡片沿用本机续播进度
 - 详情页作者区可进入 UP 主空间；主页展示头像、认证、简介、直播状态、粉丝/关注/投稿统计，支持最新投稿与最多播放切换
@@ -50,12 +52,12 @@
 
 ```bash
 ./gradlew :app:assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/debug/biliTv-debug-v0.11.1-vc15.apk
 ```
 
 项目使用 Gradle 8.10.2、Android Gradle Plugin 8.8.1、Kotlin 1.9.24、compileSdk 35，最低 Android API 23。首次使用 Gradle Wrapper 需要下载 Gradle；如果网络较慢，也可以使用本机安装的同版本 Gradle 构建。
 
-输出 APK：`app/build/outputs/apk/debug/app-debug.apk`。
+输出 APK：`app/build/outputs/apk/debug/biliTv-debug-v<versionName>-vc<versionCode>.apk`，例如 `biliTv-debug-v0.11.1-vc15.apk`。每次版本变更都会生成独立文件名，旧版本 APK 不会被覆盖。
 
 ## API 兼容策略
 
@@ -69,7 +71,7 @@ Bilibili 的部分 Web 接口要求 WBI 签名，而且接口可能返回 412、
 | 云端历史 | `/x/web-interface/history/cursor` | 需要登录；保留 max / business / view_at 游标、分 P、观看进度及观看时间，按账号合并 |
 | 搜索 | `/x/web-interface/wbi/search/type` | 回退 `/x/web-interface/search/type` |
 | 详情 | `/x/web-interface/view` | 按 BVID |
-| 播放 | `/x/player/wbi/playurl` | 回退旧 playurl；DASH 请求完整高规格能力，按服务端轨道和本机解码/显示能力过滤 |
+| 播放 | `/x/player/wbi/playurl` | 回退旧 playurl；解析 DASH/MP4 主线路和 `backupUrl`，按服务端轨道和本机解码/显示能力过滤 |
 | 播放信息 | `/x/player/wbi/v2` | 回退 `/x/player/v2` |
 | 定位预览 | `/x/player/videoshot` | 按需读取时间表和雪碧图；失败不影响普通 seek |
 | 字幕/章节 | `/x/player/wbi/v2` | 播放器信息中的字幕与 `view_points`，本地时间轴覆盖层 |
@@ -84,6 +86,8 @@ Bilibili 的部分 Web 接口要求 WBI 签名，而且接口可能返回 412、
 
 WBI 的 `imgKey` / `subKey` 每次从 `/x/web-interface/nav` 动态提取，签名实现位于 `app/src/main/java/com/lvsaber/blblrebuild/data/BiliWbiSigner.kt`，没有把短期密钥写死在应用中。
 
+线路诊断不新增 Bilibili API：只对当前播放响应返回的签名地址做用户主动触发的、最多 64 KiB 的 Range 探测。连接、首字节和小段读取均有超时限制；诊断结果只保留在当前进程内。
+
 ## 安全与边界
 
 - 不记录、打印或提交用户 Cookie；会话使用 Android Keystore AES/GCM 加密。
@@ -91,11 +95,12 @@ WBI 的 `imgKey` / `subKey` 每次从 `/x/web-interface/nav` 动态提取，签�
 - 禁止明文 HTTP；所有接口使用 HTTPS，弹幕域名也由 HTTPS 访问。
 - 这是面向个人使用的客户端重建，不包含 Bilibili 官方资源、账号系统或原 APK 的私有实现。
 - Bilibili 接口属于服务端可变接口，登录、搜索、播放地址和匿名访问可能受风控、地区、账号权限和限流影响。
+- CDN 线路地址是短期签名资源；应用不把完整 URL 写入 SharedPreferences、日志或诊断结果，线路偏好只影响当前播放会话。
 
 ## 验证结果
 
 - `:app:assembleDebug`：通过
-- `:app:testDebugUnitTest`：通过（59 项，包含设备画质能力过滤、UP 主资料/投稿解析）
+- `:app:testDebugUnitTest`：待本轮完整测试执行（新增线路候选、线路诊断分级与原有设备能力/UP 主解析测试）
 - `:app:lintDebug`：通过；仅有非阻断的依赖升级、国际化和横屏适配提示
 - 0.9.0 已完成 Android TV API31/ARM64 模拟器 UI 回归：详情作者入口、UP 主资料与投稿网格、排序切换、关注登录引导、我的关注入口均通过；模拟器已关闭
 - 已验证公开接口：view、普通 playurl、player v2、WBI v2、nav、hotword、二维码生成及未扫码轮询

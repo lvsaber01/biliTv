@@ -9,6 +9,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 
 /**
@@ -18,6 +19,7 @@ import kotlin.math.max
 class BiliApiClient(context: Context) {
     private val credentialStore = CredentialStore(context.applicationContext)
     @Volatile private var wbiKeys: Pair<String, String>? = null
+    private val rankingCache = ConcurrentHashMap<Int, List<VideoSummary>>()
 
     fun getPopularVideos(page: Int = 1, pageSize: Int = 20): List<VideoSummary> {
         val root = get("/x/web-interface/popular", mapOf("ps" to pageSize.toString(), "pn" to page.toString()))
@@ -25,37 +27,68 @@ class BiliApiClient(context: Context) {
         return list.toVideoSummaries()
     }
 
-    /**
-     * Loads the current leaderboard for one of Bilibili's top-level video
-     * partitions. The v2 endpoint is the current web endpoint; the legacy
-     * ranking path remains a compatibility fallback for older responses.
-     */
-    fun getRegionVideos(rid: Int): List<VideoSummary> {
-        val root = runCatching {
-            get(
-                "/x/web-interface/ranking/v2",
-                mapOf("rid" to rid.toString(), "type" to "all"),
-            )
-        }.recoverCatching {
-            get(
-                "/x/web-interface/ranking",
-                mapOf("rid" to rid.toString(), "day" to "3"),
-            )
-        }.getOrThrow()
-        val list = root.optJSONObject("data")?.optJSONArray("list") ?: JSONArray()
-        return list.toVideoSummaries()
+    /** Loads the current finite leaderboard for a Bilibili video partition. */
+    fun getRegionVideos(rid: Int): List<VideoSummary> = loadRanking(rid, null)
+
+    /** Loads one 12-item slice and keeps finite ranking responses in memory for subsequent slices. */
+    fun getBrowseBatch(rail: BrowseRail, page: Int, refreshRanking: Boolean = false): BrowseFetchResult {
+        require(page > 0) { "页码必须大于 0" }
+        return when (rail.source) {
+            BrowseSource.POPULAR -> {
+                val videos = getPopularVideos(page, RailBuffer.BATCH_SIZE)
+                BrowseFetchResult(videos, videos.size < RailBuffer.BATCH_SIZE)
+            }
+            BrowseSource.ALL_RANKING, BrowseSource.REGION_RANKING -> {
+                val rid = if (rail.source == BrowseSource.ALL_RANKING) 0 else
+                    rail.rankingRid ?: throw IllegalArgumentException("排行榜轨道缺少 rankingRid")
+                val list = cachedRanking(rid, rail.rankingRefererSlug, refreshRanking && page == 1)
+                BrowseBatchSlicer.slice(list, page)
+            }
+            BrowseSource.REGION_RECOMMEND -> {
+                val regionId = rail.regionFeedId ?: throw IllegalArgumentException("推荐轨道缺少 regionFeedId")
+                val root = try {
+                    get("/x/web-interface/region/feed/rcmd", mapOf(
+                        "from_region" to regionId.toString(), "display_id" to page.toString(),
+                        "request_cnt" to RailBuffer.BATCH_SIZE.toString(), "device" to "web", "plat" to "30",
+                    ))
+                } catch (error: BiliApiException) {
+                    if (error.apiCode == 62013) return BrowseFetchResult(emptyList(), true)
+                    throw error
+                }
+                val videos = (root.optJSONObject("data")?.optJSONArray("archives") ?: JSONArray()).toVideoSummaries()
+                BrowseFetchResult(videos, videos.isEmpty())
+            }
+            BrowseSource.KEYWORD_SEARCH -> {
+                val keyword = rail.keyword ?: throw IllegalArgumentException("主题搜索轨道缺少关键词")
+                val videos = searchVideos(keyword, page, RailBuffer.BATCH_SIZE, rail.searchTid)
+                BrowseFetchResult(videos, videos.isEmpty())
+            }
+        }
     }
 
-    fun getBrowseVideos(rail: BrowseRail, page: Int): List<VideoSummary> = when {
-        rail.keyword != null -> searchVideos(rail.keyword, page, RailBuffer.BATCH_SIZE, rail.searchTid)
-        rail.regionId != null -> {
-            val root = get("/x/web-interface/region/feed/rcmd", mapOf(
-                "from_region" to rail.regionId.toString(), "display_id" to page.toString(),
-                "request_cnt" to RailBuffer.BATCH_SIZE.toString(), "device" to "web", "plat" to "30",
-            ))
-            (root.optJSONObject("data")?.optJSONArray("archives") ?: JSONArray()).toVideoSummaries()
+    private fun cachedRanking(rid: Int, refererSlug: String?, refresh: Boolean): List<VideoSummary> {
+        if (!refresh) rankingCache[rid]?.let { return it }
+        synchronized(rankingCache) {
+            if (!refresh) rankingCache[rid]?.let { return it }
+            // Keep the previous value until a refresh succeeds; an API error must not erase usable cards.
+            val latest = loadRanking(rid, refererSlug)
+            rankingCache[rid] = latest
+            return latest
         }
-        else -> getPopularVideos(page, RailBuffer.BATCH_SIZE)
+    }
+
+    private fun loadRanking(rid: Int, refererSlug: String?): List<VideoSummary> {
+        val params = mapOf("rid" to rid.toString(), "type" to "all", "web_location" to "333.934")
+        val root = try {
+            get("/x/web-interface/ranking/v2", params, HOME_REFERER)
+        } catch (error: BiliApiException) {
+            if (error.apiCode != -352) throw error
+            val path = refererSlug?.takeIf { it.matches(Regex("[a-zA-Z0-9_-]+")) } ?: "all"
+            get("/x/web-interface/ranking/v2", params, "$RANKING_REFERER_PREFIX$path")
+        }
+        val data = root.optJSONObject("data") ?: throw BiliApiException(-500, "排行榜数据为空")
+        val list = data.optJSONArray("list") ?: throw BiliApiException(-500, "排行榜列表缺失")
+        return list.toVideoSummaries()
     }
 
     fun searchVideos(keyword: String, page: Int = 1, pageSize: Int = 20, tid: Int? = null): List<VideoSummary> {
@@ -97,6 +130,7 @@ class BiliApiClient(context: Context) {
             likes = stat?.optLong("like") ?: 0L,
             danmaku = stat?.optLong("danmaku") ?: 0L,
             authorMid = owner?.optLong("mid") ?: 0L,
+            publishTimeSeconds = data.optLong("pubdate").takeIf { it > 0L },
         )
         val pageList = buildList {
             for (index in 0 until pages.length()) {
@@ -213,6 +247,8 @@ class BiliApiClient(context: Context) {
                         likes = item.optLong("favorites"),
                         danmaku = item.optLong("video_review"),
                         authorMid = item.optLong("mid"),
+                        publishTimeSeconds = item.optLong("created").takeIf { it > 0L }
+                            ?: item.optLong("pubdate").takeIf { it > 0L },
                     ),
                 )
             }
@@ -278,8 +314,11 @@ class BiliApiClient(context: Context) {
         device: PlaybackDeviceCapabilities = PlaybackDeviceCapabilities.unrestricted(),
     ): PlaySource {
         val dashRequested = settings.videoFormat == AppSettings.VideoFormat.DASH ||
+            // Automatic quality must see the DASH codec set. The legacy MP4
+            // response commonly tops out at 720p for anonymous/current API calls.
+            settings.defaultQuality == 0 ||
             settings.defaultQuality in DASH_QUALITY_IDS ||
-            settings.videoCodec in setOf(AppSettings.VideoCodec.HEVC, AppSettings.VideoCodec.AV1)
+            settings.videoCodec != AppSettings.VideoCodec.AUTO
         val requestedQuality = if (dashRequested) settings.defaultQuality else settings.defaultQuality.takeIf { it > 0 } ?: 80
         val params = linkedMapOf(
             "bvid" to bvid,
@@ -315,10 +354,25 @@ class BiliApiClient(context: Context) {
                     track.copy(deviceSupported = support.supported, deviceReason = support.reason)
                 }
             val audioTracks = dash?.optJSONArray("audio")?.toAudioTracks().orEmpty()
-            val qualities = mergeQualities(serverQualities, videoTracks, device)
-            val selectedVideo = selectVideoTrack(videoTracks, settings)
+            // The quality chooser is intentionally resolution-only. For an
+            // explicit codec, omit resolutions that have no such DASH track.
+            val qualityTracks = PlaybackTrackSelector.selectableTracks(videoTracks, settings.videoCodec)
+            val qualities = mergeQualities(
+                serverQualities,
+                qualityTracks,
+                device,
+                requireConcreteTrack = settings.videoCodec != AppSettings.VideoCodec.AUTO,
+            )
+            val selectedVideo = PlaybackTrackSelector.select(videoTracks, settings)
+            if (settings.videoCodec != AppSettings.VideoCodec.AUTO && (selectedVideo == null || audioTracks.isEmpty())) {
+                throw BiliApiException(-415, "当前视频没有可用的${settings.videoCodec.label}轨道，请切换编码或画质")
+            }
             val selectedAudio = audioTracks.maxByOrNull { it.bandwidth }
             if (selectedVideo != null && selectedAudio != null) {
+                val routeSet = PlaybackRouteSet.fromUrls(
+                    listOf(selectedVideo.url) + selectedVideo.backupUrls,
+                    listOf(selectedAudio.url) + selectedAudio.backupUrls,
+                )
                 return PlaySource(
                     url = "",
                     quality = qualityLabel(selectedVideo.id, selectedVideo.height, selectedVideo.isHdr, selectedVideo.isDolbyVision),
@@ -328,6 +382,7 @@ class BiliApiClient(context: Context) {
                     isDash = true,
                     availableAudio = audioTracks.sortedByDescending { it.bandwidth },
                     availableQualities = qualities,
+                    routeSet = routeSet,
                 )
             }
             if (videoTracks.isNotEmpty() && !settings.experimentalQualityEnabled && videoTracks.none { it.deviceSupported }) {
@@ -339,37 +394,17 @@ class BiliApiClient(context: Context) {
         val first = durl?.optJSONObject(0)
         val url = first?.optString("url").orEmpty()
         if (url.isBlank()) throw BiliApiException(-404, "当前视频没有可用的 MP4 播放地址")
+        val routeSet = PlaybackRouteSet.fromUrls(
+            listOf(url) + (first?.optStringArray("backup_url", "backupUrl").orEmpty()),
+        )
         val actualQuality = data.optInt("quality").takeIf { it > 0 } ?: requestedQuality
         return PlaySource(
             url = url,
             quality = qualityLabel(actualQuality, 0, actualQuality in HDR_QUALITY_IDS, actualQuality == 126),
             mimeType = "video/mp4",
             availableQualities = serverQualities.map { quality -> quality.withDevice(device) },
+            routeSet = routeSet,
         )
-    }
-
-    private fun selectVideoTrack(tracks: List<VideoTrack>, settings: AppSettings): VideoTrack? {
-        if (tracks.isEmpty()) return null
-        val deviceTracks = tracks.filter { it.deviceSupported || settings.experimentalQualityEnabled }
-        val candidateTracks = deviceTracks.ifEmpty { tracks.takeIf { settings.experimentalQualityEnabled }.orEmpty() }
-        val codecTracks = candidateTracks.filter { track ->
-            when (settings.videoCodec) {
-                AppSettings.VideoCodec.AUTO -> true
-                AppSettings.VideoCodec.AVC -> track.codecs.startsWith("avc", ignoreCase = true)
-                AppSettings.VideoCodec.HEVC -> track.codecs.startsWith("hev", ignoreCase = true) || track.codecs.startsWith("hvc", ignoreCase = true)
-                AppSettings.VideoCodec.AV1 -> track.codecs.startsWith("av01", ignoreCase = true)
-            }
-        }.ifEmpty { candidateTracks }
-        val exact = settings.defaultQuality.takeIf { it > 0 }
-            ?.let { quality -> codecTracks.firstOrNull { it.id == quality } }
-        if (exact != null) return exact
-        val targetHeight = qualityTargetHeight(settings.defaultQuality)
-        return codecTracks.sortedWith(
-            compareBy<VideoTrack> { if (targetHeight == Int.MAX_VALUE || it.height <= targetHeight) 0 else 1 }
-                .thenByDescending { if (targetHeight == Int.MAX_VALUE || it.height <= targetHeight) it.height else -it.height }
-                .thenByDescending { it.id }
-                .thenByDescending { it.bandwidth },
-        ).firstOrNull()
     }
 
     private fun JSONArray.toVideoTracks(): List<VideoTrack> = buildList {
@@ -475,10 +510,19 @@ class BiliApiClient(context: Context) {
         return result.distinctBy { it.id }.sortedByDescending { it.id }
     }
 
-    private fun mergeQualities(server: List<PlaybackQuality>, tracks: List<VideoTrack>, device: PlaybackDeviceCapabilities): List<PlaybackQuality> {
+    private fun mergeQualities(
+        server: List<PlaybackQuality>,
+        tracks: List<VideoTrack>,
+        device: PlaybackDeviceCapabilities,
+        requireConcreteTrack: Boolean = false,
+    ): List<PlaybackQuality> {
         // DASH quality entries without a concrete track URL are entitlement
         // metadata only; do not present them as selectable in the player.
-        val ids = if (tracks.isNotEmpty()) tracks.map { it.id }.distinct() else server.map { it.id }.distinct()
+        val ids = when {
+            tracks.isNotEmpty() -> tracks.map { it.id }.distinct()
+            requireConcreteTrack -> emptyList()
+            else -> server.map { it.id }.distinct()
+        }
         return ids.mapNotNull { id ->
             val matching = tracks.filter { it.id == id }
             val base = server.firstOrNull { it.id == id }
@@ -527,17 +571,7 @@ class BiliApiClient(context: Context) {
         }
     }
 
-    private fun qualityTargetHeight(id: Int): Int = when {
-        id <= 0 -> Int.MAX_VALUE
-        id == 6 -> 240
-        id == 16 -> 360
-        id == 32 -> 480
-        id == 64 || id == 74 -> 720
-        id in setOf(80, 112, 116) -> 1080
-        id in setOf(120, 125, 126, 129) -> 2160
-        id == 127 -> 4320
-        else -> 1080
-    }
+    private fun qualityTargetHeight(id: Int): Int = PlaybackTrackSelector.qualityTargetHeight(id)
 
     fun getSubtitleInfo(bvid: String, cid: Long): JSONObject {
         val params = mapOf("bvid" to bvid, "cid" to cid.toString())
@@ -609,30 +643,6 @@ class BiliApiClient(context: Context) {
                 )
             }
         }
-    }
-
-    fun getVideoPreview(bvid: String, cid: Long): PreviewSprite? {
-        val root = get("/x/player/videoshot", mapOf("bvid" to bvid, "cid" to cid.toString(), "index" to "1"))
-        return parseVideoPreview(root)
-    }
-
-    internal fun parseVideoPreview(root: JSONObject): PreviewSprite? {
-        val data = root.optJSONObject("data") ?: return null
-        val images = data.optJSONArray("image")?.let { array ->
-            (0 until array.length()).map { array.optString(it).toHttps() }.filter(String::isNotBlank)
-        }.orEmpty()
-        val index = data.optJSONArray("index")?.let { array ->
-            (0 until array.length()).map { array.optInt(it).coerceAtLeast(0) }
-        }.orEmpty()
-        if (images.isEmpty() || index.isEmpty()) return null
-        return PreviewSprite(
-            images = images,
-            columns = data.optInt("img_x_len", 10).coerceAtLeast(1),
-            rows = data.optInt("img_y_len", 10).coerceAtLeast(1),
-            cellWidth = data.optInt("img_x_size", 160).coerceAtLeast(1),
-            cellHeight = data.optInt("img_y_size", 90).coerceAtLeast(1),
-            timestampsSeconds = index,
-        )
     }
 
     fun getHistory(pageSize: Int = 20): List<VideoSummary> {
@@ -779,8 +789,8 @@ class BiliApiClient(context: Context) {
         ?.substringAfter('=')?.takeIf { it.isNotBlank() }
         ?: throw BiliApiException(-111, "登录 Cookie 缺少 CSRF，需重新扫码登录")
 
-    private fun get(path: String, params: Map<String, String>): JSONObject {
-        val response = requestRoot(path, params)
+    private fun get(path: String, params: Map<String, String>, referer: String = HOME_REFERER): JSONObject {
+        val response = requestRoot(path, params, referer)
         val code = response.optInt("code", 0)
         if (code != 0) {
             throw BiliApiException(code, response.optString("message", "Bilibili API error"))
@@ -806,8 +816,12 @@ class BiliApiClient(context: Context) {
         return result
     }
 
-    private fun requestRoot(path: String, params: Map<String, String> = emptyMap()): JSONObject {
-        return requestRoot(BASE_URL, path, params)
+    private fun requestRoot(
+        path: String,
+        params: Map<String, String> = emptyMap(),
+        referer: String = HOME_REFERER,
+    ): JSONObject {
+        return requestRoot(BASE_URL, path, params, credentialStore.readCookie(), referer)
     }
 
     private fun postForm(path: String, params: Map<String, String>): JSONObject {
@@ -835,10 +849,16 @@ class BiliApiClient(context: Context) {
         } finally { connection.disconnect() }
     }
 
-    private fun requestRoot(baseUrl: String, path: String, params: Map<String, String>, cookie: String? = credentialStore.readCookie()): JSONObject {
+    private fun requestRoot(
+        baseUrl: String,
+        path: String,
+        params: Map<String, String>,
+        cookie: String? = credentialStore.readCookie(),
+        referer: String = HOME_REFERER,
+    ): JSONObject {
         val query = params.entries.joinToString("&") { "${encode(it.key)}=${encode(it.value)}" }
         val url = if (query.isBlank()) "$baseUrl$path" else "$baseUrl$path?$query"
-        val connection = openConnection(url, cookie)
+        val connection = openConnection(url, cookie, referer)
         val response = readResponse(connection)
         val root = runCatching { JSONObject(response.body) }.getOrElse {
             throw BiliApiException(response.httpCode, "Bilibili 返回了非 JSON 数据", response.httpCode)
@@ -850,14 +870,18 @@ class BiliApiClient(context: Context) {
         return root
     }
 
-    private fun openConnection(url: String, cookie: String? = credentialStore.readCookie()): HttpURLConnection {
+    private fun openConnection(
+        url: String,
+        cookie: String? = credentialStore.readCookie(),
+        referer: String = HOME_REFERER,
+    ): HttpURLConnection {
         val connection = URL(url).openConnection() as HttpURLConnection
         connection.connectTimeout = 15_000
         connection.readTimeout = 20_000
         connection.requestMethod = "GET"
         connection.setRequestProperty("Accept", "application/json, text/plain, */*")
         connection.setRequestProperty("User-Agent", USER_AGENT)
-        connection.setRequestProperty("Referer", "https://www.bilibili.com/")
+        connection.setRequestProperty("Referer", referer)
         connection.setRequestProperty("Origin", "https://www.bilibili.com")
         connection.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
         connection.setRequestProperty("Sec-Fetch-Site", "same-site")
@@ -915,6 +939,7 @@ class BiliApiClient(context: Context) {
                     likes = stat?.optLong("like") ?: item.optLong("favorites"),
                     danmaku = stat?.optLong("danmaku") ?: item.optLong("video_review"),
                     authorMid = owner?.optLong("mid") ?: item.optLong("mid"),
+                    publishTimeSeconds = item.optLong("pubdate").takeIf { it > 0L },
                 ),
             )
         }
@@ -939,6 +964,7 @@ class BiliApiClient(context: Context) {
                     views = 0L,
                     likes = 0L,
                     danmaku = 0L,
+                    publishTimeSeconds = item.optLong("pubdate").takeIf { it > 0L },
                 ),
             )
         }
@@ -971,6 +997,8 @@ class BiliApiClient(context: Context) {
         private const val DASH_CAPABILITY_FLAGS = 4048
         private val DASH_QUALITY_IDS = setOf(74, 100, 112, 116, 120, 125, 126, 127, 129)
         private val HDR_QUALITY_IDS = setOf(125, 126, 129)
+        private const val HOME_REFERER = "https://www.bilibili.com/"
+        private const val RANKING_REFERER_PREFIX = "https://www.bilibili.com/v/popular/rank/"
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 13; Tablet) AppleWebKit/537.36 " +
                 "Chrome/131.0.0.0 Mobile Safari/537.36"

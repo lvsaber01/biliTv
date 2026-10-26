@@ -13,6 +13,7 @@ data class VideoSummary(
     val likes: Long,
     val danmaku: Long,
     val authorMid: Long = 0L,
+    val publishTimeSeconds: Long? = null,
 )
 
 data class VideoPage(
@@ -20,6 +21,12 @@ data class VideoPage(
     val cid: Long,
     val title: String,
     val durationSeconds: Int,
+)
+
+data class BrowseFetchResult(
+    val videos: List<VideoSummary>,
+    /** True means this source has no more pages in the current result set. */
+    val exhausted: Boolean,
 )
 
 data class VideoDetail(
@@ -58,38 +65,6 @@ data class UserVideoPage(
     val hasMore: Boolean get() = videos.isNotEmpty() && page * pageSize < total
 }
 
-data class PreviewSprite(
-    val images: List<String>,
-    val columns: Int,
-    val rows: Int,
-    val cellWidth: Int,
-    val cellHeight: Int,
-    val timestampsSeconds: List<Int>,
-) {
-    val cellsPerImage: Int get() = (columns * rows).coerceAtLeast(1)
-
-    fun frameAt(seconds: Int): PreviewFrame? {
-        if (images.isEmpty() || timestampsSeconds.isEmpty()) return null
-        val target = seconds.coerceAtLeast(0)
-        var index = 0
-        timestampsSeconds.forEachIndexed { candidate, timestamp ->
-            if (timestamp <= target) index = candidate
-        }
-        val page = index / cellsPerImage
-        val cell = index % cellsPerImage
-        if (page !in images.indices) return null
-        return PreviewFrame(images[page], cell % columns, cell / columns, cellWidth, cellHeight)
-    }
-}
-
-data class PreviewFrame(
-    val imageUrl: String,
-    val column: Int,
-    val row: Int,
-    val width: Int,
-    val height: Int,
-)
-
 data class SubtitleTrack(
     val id: Long,
     val language: String,
@@ -123,6 +98,7 @@ data class PlaySource(
     val isDash: Boolean = false,
     val availableAudio: List<AudioTrack> = emptyList(),
     val availableQualities: List<PlaybackQuality> = emptyList(),
+    val routeSet: PlaybackRouteSet = PlaybackRouteSet(),
 )
 
 /**

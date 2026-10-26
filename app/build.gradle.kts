@@ -1,3 +1,5 @@
+import com.android.build.gradle.internal.api.BaseVariantOutputImpl
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -11,8 +13,8 @@ android {
         applicationId = "com.lvsaber.blblrebuild"
         minSdk = 23
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.9.0"
+        versionCode = 18
+        versionName = "0.12.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -24,6 +26,16 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+        }
+    }
+
+    // Keep every debug build identifiable so test devices can retain and
+    // compare older APKs instead of silently overwriting app-debug.apk.
+    applicationVariants.all {
+        if (buildType.name == "debug") {
+            outputs.all {
+                (this as BaseVariantOutputImpl).outputFileName = "biliTv-debug-v${versionName}-vc${versionCode}.apk"
+            }
         }
     }
 

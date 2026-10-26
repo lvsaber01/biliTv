@@ -99,7 +99,10 @@ case "${1:-help}" in
         ;;
     install)
         require_device; wait_ready
-        apk="${2:-$PROJECT_ROOT/app/build/outputs/apk/debug/app-debug.apk}"
+        apk="${2:-}"
+        if [[ -z "$apk" ]]; then
+            apk="$(rg --files --no-ignore "$PROJECT_ROOT/app/build/outputs/apk/debug" 2>/dev/null | rg '/biliTv-debug-v[^/]+\.apk$' | sort -V | tail -n 1)"
+        fi
         [[ -f "$apk" ]] || die "APK missing; run bash tools/tv-lab.sh build first."
         device install -r "$apk"
         ;;

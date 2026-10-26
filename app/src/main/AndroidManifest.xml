@@ -45,6 +45,10 @@
             android:exported="false"
             android:screenOrientation="sensorLandscape" />
         <activity
+            android:name=".ui.NetworkDiagnosticsActivity"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape" />
+        <activity
             android:name=".ui.MainActivity"
             android:configChanges="screenSize|orientation|keyboardHidden"
             android:exported="true"

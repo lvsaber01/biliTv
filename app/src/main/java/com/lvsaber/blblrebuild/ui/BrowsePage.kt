@@ -8,9 +8,11 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.widget.NestedScrollView
+import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -19,11 +21,20 @@ import com.lvsaber.blblrebuild.core.AppExecutors
 import com.lvsaber.blblrebuild.data.AppSettings
 import com.lvsaber.blblrebuild.data.BiliApiClient
 import com.lvsaber.blblrebuild.data.BrowseRail
+import com.lvsaber.blblrebuild.data.BrowseSource
 import com.lvsaber.blblrebuild.data.ChannelCatalog
 import com.lvsaber.blblrebuild.data.ChannelDefinition
 import com.lvsaber.blblrebuild.data.RailBuffer
 import com.lvsaber.blblrebuild.data.VideoSummary
 import java.util.concurrent.RejectedExecutionException
+
+private data class RailLoadResult(
+    val videos: List<VideoSummary>,
+    val nextPage: Int,
+    val exhausted: Boolean,
+    val successfulPages: Int,
+    val error: Throwable? = null,
+)
 
 /** A page keeps its data and scroll state while switching channels. */
 @UnstableApi
@@ -55,6 +66,9 @@ class BrowsePage(
         var layoutState: android.os.Parcelable? = null
         var error: String? = null
         var failedReset = false
+        var pendingRefresh = false
+        var focusAfterRefresh = false
+        var refreshScrollY = 0
         val adapter = Cards(this)
     }
 
@@ -65,6 +79,9 @@ class BrowsePage(
     private var active = false
     private var disposed = false
     private var hero: View? = null
+    private var heroImage: ImageView? = null
+    private var heroVideo: VideoSummary? = null
+    private val coverScope = CoverLoader.newScope()
     private val heroHost = FrameLayout(context)
     private var verticalPosition = 0
     private var lastFocusedRail: Rail? = null
@@ -86,7 +103,7 @@ class BrowsePage(
 
     init {
         orientation = VERTICAL
-        val definitions = if (grid) listOf(BrowseRail("featured", "热门精选"))
+        val definitions = if (grid) listOf(BrowseRail("featured", "热门精选", BrowseSource.POPULAR))
             else channel?.let { ChannelCatalog.rails(it, settings) } ?: ChannelCatalog.homeRails(settings)
         if (channel == null && settings.heroEnabled && !grid && definitions.isNotEmpty()) {
             heroHost.addView(Ui.text(context, "正在准备本期推荐…", 20f))
@@ -113,6 +130,12 @@ class BrowsePage(
             }
         }
         post {
+            heroVideo?.let { video ->
+                heroImage?.let { image ->
+                    CoverLoader.load(image, video.coverUrl, 1024, coverScope,
+                        if (image.isAttachedToWindow) CoverLoader.Priority.VISIBLE else CoverLoader.Priority.NORMAL)
+                }
+            }
             scroll.scrollTo(0, verticalPosition)
             val remembered = lastFocusedRail
             if (remembered != null && remembered.items.isNotEmpty()) focusCard(remembered, remembered.focusIndex)
@@ -129,6 +152,7 @@ class BrowsePage(
     fun deactivate() {
         if (!active) return
         active = false
+        CoverLoader.cancel(coverScope)
         verticalPosition = scroll.scrollY
         focusRail = null
         rails.forEach {
@@ -139,13 +163,23 @@ class BrowsePage(
         }
     }
 
-    fun dispose() { disposed = true; deactivate(); rails.forEach { it.version++ } }
+    fun dispose() {
+        disposed = true
+        deactivate()
+        CoverLoader.cancel(coverScope)
+        rails.forEach { it.version++ }
+    }
 
     private fun addRail(definition: BrowseRail) {
         val rail = Rail(definition)
         rails += rail
         val header = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
-        header.addView(Ui.text(context, definition.title, 15f).apply { setPadding(0, 0, 0, 0) }, LayoutParams(0, Ui.dp(context, 26), 1f))
+        val titleColumn = LinearLayout(context).apply { orientation = VERTICAL }
+        titleColumn.addView(Ui.text(context, definition.title, 15f).apply { setPadding(0, 0, 0, 0) })
+        if (definition.source == BrowseSource.ALL_RANKING || definition.source == BrowseSource.REGION_RANKING) {
+            titleColumn.addView(Ui.text(context, "按质量与近期数据综合，动态更新", 10f, Ui.muted).apply { setPadding(0, 0, 0, 0) })
+        }
+        header.addView(titleColumn, LayoutParams(0, -2, 1f))
         header.addView(rail.status)
         rail.retry.visibility = GONE
         header.addView(rail.retry)
@@ -185,7 +219,11 @@ class BrowsePage(
             if (event.action != KeyEvent.ACTION_DOWN) false else when (key) {
                 KeyEvent.KEYCODE_DPAD_UP -> { moveVertical(rail, -1); true }
                 KeyEvent.KEYCODE_DPAD_DOWN -> { moveVertical(rail, 1); true }
-                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> { fetch(rail, demand = true, reset = rail.failedReset); true }
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                    val retryEmpty = rail.items.isEmpty() && rail.buffer.exhausted
+                    fetch(rail, demand = true, reset = rail.failedReset || retryEmpty)
+                    true
+                }
                 else -> false
             }
         }
@@ -230,8 +268,16 @@ class BrowsePage(
 
     private fun refresh(rail: Rail) {
         val now = SystemClock.uptimeMillis()
-        if (rail.loading || now - rail.lastRefresh < 500) return
+        if (rail.lastRefresh != 0L && now - rail.lastRefresh < 500) return
         rail.lastRefresh = now
+        rail.focusAfterRefresh = active
+        rail.refreshScrollY = scroll.scrollY
+        if (rail.loading) {
+            // A first-card refresh is an explicit user action; queue it behind
+            // any automatic initial load/prefetch instead of silently dropping it.
+            rail.pendingRefresh = true
+            return
+        }
         fetch(rail, demand = true, reset = true)
     }
 
@@ -252,55 +298,142 @@ class BrowsePage(
         status(rail)
         try {
             AppExecutors.browse.execute {
-                val result = runCatching {
-                    val batch = mutableListOf<VideoSummary>()
-                    val seen = known.toMutableSet()
-                    var page = firstPage
-                    var exhausted = false
-                    var attempts = 0
-                    while (alreadyBuffered + batch.size < RailBuffer.BATCH_SIZE && attempts < 3 && !exhausted) {
-                        val incoming = api.getBrowseVideos(rail.definition, page)
-                        incoming.forEach { if (seen.add(it.bvid)) batch += it }
-                        page++
-                        attempts++
-                        exhausted = incoming.isEmpty()
-                    }
-                    if (batch.isEmpty() && alreadyBuffered == 0) exhausted = true
-                    Triple(batch.toList(), page, exhausted)
-                }
+                val result = loadBatch(rail, firstPage, known, alreadyBuffered, reset)
                 post {
                     if (disposed || rail.version != version) return@post
                     rail.loading = false
-                    result.onSuccess { (batch, page, exhausted) ->
-                        if (reset) {
-                            rail.buffer = RailBuffer()
-                            val oldSize = rail.items.size
-                            rail.items.clear()
-                            if (oldSize > 0) rail.adapter.notifyItemRangeRemoved(0, oldSize)
-                            rail.focusIndex = 0
-                            rail.focusWhenReady = active && (focusRail === rail || lastFocusedRail === rail)
-                            rail.prefetchAt = -1
-                        }
-                        rail.buffer.add(batch)
-                        rail.buffer.nextPage = page
-                        rail.buffer.exhausted = exhausted
-                        if (rail.revealWhenReady) reveal(rail, focusNew = rail.focusAfterReveal)
-                        rail.focusAfterReveal = false
+                    if (rail.pendingRefresh) {
+                        rail.pendingRefresh = false
                         rail.revealWhenReady = false
-                        status(rail)
-                        loadNearby()
-                    }.onFailure {
-                        rail.error = "加载失败，按确定或重试"
-                        rail.focusAfterReveal = false
-                        rail.revealWhenReady = false
-                        status(rail)
+                        rail.focusAfterRefresh = active
+                        fetch(rail, demand = true, reset = true)
+                        return@post
                     }
+                    if (result.successfulPages == 0 && result.error != null) {
+                        rail.error = "加载失败，按确定或重试"
+                        rail.failedReset = reset
+                        if (!reset && rail.revealWhenReady && rail.buffer.availableCount > 0) {
+                            reveal(rail, focusNew = rail.focusAfterReveal)
+                        }
+                        rail.focusAfterReveal = false
+                        rail.revealWhenReady = false
+                        restoreRefreshFocus(rail)
+                        status(rail)
+                        focusEmptyStatusIfPending(rail)
+                        return@post
+                    }
+
+                    if (reset && result.error != null && rail.items.isNotEmpty()) {
+                        // A refresh that fails partway through must leave the existing rail usable.
+                        rail.error = "刷新未完成，原内容已保留，按确定重试"
+                        rail.failedReset = true
+                        restoreRefreshFocus(rail)
+                        status(rail)
+                        focusEmptyStatusIfPending(rail)
+                        return@post
+                    }
+
+                    if (reset) {
+                        rail.buffer = RailBuffer()
+                        rail.buffer.add(result.videos)
+                        rail.buffer.nextPage = result.nextPage
+                        rail.buffer.exhausted = result.exhausted
+                        val refreshed = rail.buffer.reveal()
+                        replaceItems(rail, refreshed)
+                        rail.focusIndex = 0
+                        // Diff by BVID so unchanged cards and their loaded covers stay in place.
+                        rail.focusWhenReady = active && !rail.focusAfterRefresh &&
+                            (focusRail === rail || lastFocusedRail === rail)
+                        rail.prefetchAt = -1
+                        if (channel == null && settings.heroEnabled && !grid && rail === rails.firstOrNull() && refreshed.isNotEmpty()) {
+                            addHero(refreshed.first())
+                        }
+                    } else {
+                        rail.buffer.add(result.videos)
+                        rail.buffer.nextPage = result.nextPage
+                        rail.buffer.exhausted = result.exhausted
+                        if (rail.revealWhenReady) reveal(rail, focusNew = rail.focusAfterReveal)
+                    }
+                    rail.error = result.error?.let { "部分内容已加载，按确定重试" }
+                    rail.failedReset = false
+                    if (reset) restoreRefreshFocus(rail)
+                    rail.focusAfterReveal = false
+                    rail.revealWhenReady = false
+                    status(rail)
+                    focusEmptyStatusIfPending(rail)
+                    loadNearby()
                 }
             }
         } catch (_: RejectedExecutionException) {
             rail.loading = false
             rail.error = "请求繁忙，请重试"
+            restoreRefreshFocus(rail)
             status(rail)
+            focusEmptyStatusIfPending(rail)
+        }
+    }
+
+    /** Consume at most three API pages per user action; only successful pages advance the cursor. */
+    private fun loadBatch(
+        rail: Rail,
+        firstPage: Int,
+        knownIds: Set<String>,
+        alreadyBuffered: Int,
+        reset: Boolean,
+    ): RailLoadResult {
+        val batch = mutableListOf<VideoSummary>()
+        val seen = knownIds.toMutableSet()
+        var page = firstPage
+        var exhausted = false
+        var attempts = 0
+        var successfulPages = 0
+        var failure: Throwable? = null
+        while (alreadyBuffered + batch.size < RailBuffer.BATCH_SIZE && attempts < 3 && !exhausted) {
+            val response = try {
+                api.getBrowseBatch(rail.definition, page, refreshRanking = reset && attempts == 0)
+            } catch (error: Exception) {
+                failure = error
+                break
+            }
+            response.videos.forEach { if (seen.add(it.bvid)) batch += it }
+            page++
+            attempts++
+            successfulPages++
+            exhausted = response.exhausted || response.videos.isEmpty()
+        }
+        if (successfulPages == 0 && failure == null && alreadyBuffered == 0) exhausted = true
+        return RailLoadResult(batch, page, exhausted, successfulPages, failure)
+    }
+
+    private fun replaceItems(rail: Rail, updated: List<VideoSummary>) {
+        val previous = rail.items.toList()
+        val next = updated.toList()
+        val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+            override fun getOldListSize() = previous.size
+            override fun getNewListSize() = next.size
+            override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int) =
+                previous[oldItemPosition].bvid == next[newItemPosition].bvid
+            override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int) =
+                previous[oldItemPosition] == next[newItemPosition]
+        }, false)
+        rail.items.clear()
+        rail.items.addAll(next)
+        diff.dispatchUpdatesTo(rail.adapter)
+    }
+
+    private fun restoreRefreshFocus(rail: Rail) {
+        if (!rail.focusAfterRefresh) return
+        rail.focusAfterRefresh = false
+        val position = rail.focusIndex.coerceAtMost((rail.items.size - 1).coerceAtLeast(0))
+        val scrollY = rail.refreshScrollY
+        scroll.post {
+            if (!active || disposed) return@post
+            scroll.scrollTo(0, scrollY)
+            if (rail.items.isNotEmpty()) focusCard(rail, position, force = true)
+            else {
+                status(rail)
+                if (rail.status.isFocusable) rail.status.requestFocus()
+            }
         }
     }
 
@@ -308,13 +441,27 @@ class BrowsePage(
         rail.status.text = when {
             rail.loading -> if (rail.items.isEmpty()) "加载中…" else "${rail.items.size} 条 · 准备下一批…"
             rail.error != null -> rail.error
-            rail.buffer.exhausted -> "${rail.items.size} 条 · 已到末尾"
+            rail.items.isEmpty() && rail.buffer.exhausted -> when (rail.definition.source) {
+                BrowseSource.REGION_RECOMMEND -> "暂无更多内容 · 按确定重试"
+                BrowseSource.KEYWORD_SEARCH -> "暂无匹配内容 · 按确定重试"
+                else -> "暂无内容 · 按确定重试"
+            }
+            rail.buffer.exhausted -> if (rail.definition.source == BrowseSource.ALL_RANKING ||
+                rail.definition.source == BrowseSource.REGION_RANKING) {
+                "${rail.items.size} 条 · 当前榜单结果已到底"
+            } else "${rail.items.size} 条 · 已到末尾"
             rail.buffer.availableCount >= RailBuffer.BATCH_SIZE -> "${rail.items.size} 条 · 下一批已就绪"
             rail.items.isEmpty() -> "暂无内容 · 按确定重试"
             else -> "${rail.items.size} 条 · 每次追加 12 条"
         }
         rail.retry.visibility = if (rail.error != null) VISIBLE else GONE
         rail.status.isFocusable = rail.items.isEmpty()
+    }
+
+    private fun focusEmptyStatusIfPending(rail: Rail) {
+        if (!active || rail.items.isNotEmpty() || !rail.focusWhenReady) return
+        rail.focusWhenReady = false
+        rail.status.requestFocus()
     }
 
     private fun moveVertical(rail: Rail, delta: Int) {
@@ -332,7 +479,7 @@ class BrowsePage(
         }
     }
 
-    private fun focusCard(rail: Rail, index: Int) {
+    private fun focusCard(rail: Rail, index: Int, force: Boolean = false) {
         if (!active || rail.items.isEmpty()) return
         focusRail = rail
         lastFocusedRail = rail
@@ -342,7 +489,7 @@ class BrowsePage(
             (rail.list.layoutManager as LinearLayoutManager).scrollToPositionWithOffset(position, 0)
         }
         fun request(attempt: Int) {
-            if (!active || focusRail !== rail) return
+            if (!active || !force && focusRail !== rail) return
             val card = rail.list.findViewHolderForAdapterPosition(position)?.itemView
             if (card != null) card.requestFocus()
             else if (attempt < 4) rail.list.postOnAnimation { request(attempt + 1) }
@@ -351,6 +498,7 @@ class BrowsePage(
     }
 
     private fun addHero(video: VideoSummary) {
+        heroImage?.let(CoverLoader::cancel)
         val card = FrameLayout(context).apply {
             isFocusable = true
             isClickable = true
@@ -369,7 +517,10 @@ class BrowsePage(
             ellipsize = android.text.TextUtils.TruncateAt.END
         }
         card.addView(label, FrameLayout.LayoutParams(-1, -1))
-        CoverLoader.load(image, video.coverUrl, 1024)
+        heroImage = image
+        heroVideo = video
+        CoverLoader.load(image, video.coverUrl, 1024, coverScope,
+            if (image.isAttachedToWindow) CoverLoader.Priority.VISIBLE else CoverLoader.Priority.NORMAL)
         Ui.focusHighlight(card)
         hero = card
         heroHost.removeAllViews()
@@ -393,7 +544,7 @@ class BrowsePage(
             if (!grid) card.layoutParams = (card.layoutParams as RecyclerView.LayoutParams).apply {
                 width = cardWidth; height = Ui.cardHeight(context, cardWidth)
             }
-            card.bind(rail.items[position])
+            card.bind(rail.items[position], coverScope)
             card.setOnFocusChangeListener { view, focused ->
                 Ui.applyFocusHighlight(view, focused)
                 val index = holder.bindingAdapterPosition
@@ -418,6 +569,10 @@ class BrowsePage(
                     else -> false
                 }
             }
+        }
+        override fun onViewRecycled(holder: CardHolder) {
+            (holder.itemView as? VideoCard)?.unbind()
+            super.onViewRecycled(holder)
         }
     }
     private class CardHolder(view: View) : RecyclerView.ViewHolder(view)

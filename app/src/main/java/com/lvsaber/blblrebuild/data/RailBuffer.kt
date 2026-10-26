@@ -23,3 +23,15 @@ class RailBuffer {
         return items.subList(start, visibleCount).toList()
     }
 }
+
+/** Ranking endpoints return a finite list rather than a pageable feed. */
+object BrowseBatchSlicer {
+    fun slice(items: List<VideoSummary>, page: Int, batchSize: Int = RailBuffer.BATCH_SIZE): BrowseFetchResult {
+        require(page > 0) { "页码必须大于 0" }
+        require(batchSize > 0) { "批次大小必须大于 0" }
+        val start = (page - 1) * batchSize
+        if (start >= items.size) return BrowseFetchResult(emptyList(), exhausted = true)
+        val end = (start + batchSize).coerceAtMost(items.size)
+        return BrowseFetchResult(items.subList(start, end), exhausted = end >= items.size)
+    }
+}

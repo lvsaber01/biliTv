@@ -27,12 +27,21 @@ import com.lvsaber.blblrebuild.data.AudioTrack
 import com.lvsaber.blblrebuild.data.BiliApiClient
 import com.lvsaber.blblrebuild.data.PlaySource
 import com.lvsaber.blblrebuild.data.PlaybackDeviceCapabilities
+import com.lvsaber.blblrebuild.data.PlaybackDiagnosticsSnapshot
+import com.lvsaber.blblrebuild.data.PlaybackDiagnosticsStore
 import com.lvsaber.blblrebuild.data.PlaybackQuality
+import com.lvsaber.blblrebuild.data.PlaybackRouteSet
 import com.lvsaber.blblrebuild.data.PlayerInfo
+import com.lvsaber.blblrebuild.data.RouteAwareDataSource
 import com.lvsaber.blblrebuild.data.SubtitleTrack
 import com.lvsaber.blblrebuild.data.ProgressRepository
 import com.lvsaber.blblrebuild.data.WatchProgress
 import com.lvsaber.blblrebuild.data.VideoSummary
+import androidx.media3.datasource.HttpDataSource
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import java.util.concurrent.atomic.AtomicReference
 
 @UnstableApi
 class PlayerActivity : AppCompatActivity() {
@@ -49,6 +58,8 @@ class PlayerActivity : AppCompatActivity() {
     private var errorMessageView: android.widget.TextView? = null
     private var retryButton: android.widget.Button? = null
     private var lowerQualityButton: android.widget.Button? = null
+    private var routeButton: android.widget.Button? = null
+    private var codecFallbackButton: android.widget.Button? = null
     private lateinit var actionRail: LinearLayout
     private lateinit var controls: PlaybackControls
     private lateinit var deviceCapabilities: PlaybackDeviceCapabilities
@@ -64,10 +75,26 @@ class PlayerActivity : AppCompatActivity() {
     private var playerInfo = PlayerInfo()
     private var subtitleLoading = false
     private var resumeOnForeground = true
+    private var sourceRefreshAttempted = false
+    private val routeRecoveryAttempted = linkedSetOf<String>()
+    private var routeSwitchCount = 0
+    private var lastRouteToastAt = 0L
+    private var firstFrameStartedAt = 0L
+    private var bufferingStartedAt = 0L
+    private var bufferingCount = 0
+    private var bufferingMs = 0L
+    private var lastPlaybackState = Player.STATE_IDLE
     private val tickerHandler = Handler(Looper.getMainLooper())
+    private val danmakuTicker = object : Runnable {
+        override fun run() {
+            if (!isFinishing && !isDestroyed && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+                if (::danmakuOverlay.isInitialized) danmakuOverlay.positionMs = player?.currentPosition ?: 0L
+                tickerHandler.postDelayed(this, 16L)
+            }
+        }
+    }
     private val ticker = object : Runnable {
         override fun run() {
-            if (::danmakuOverlay.isInitialized) danmakuOverlay.positionMs = player?.currentPosition ?: 0L
             if (::subtitleOverlay.isInitialized) subtitleOverlay.update(player?.currentPosition ?: 0L)
             updatePlaybackUi()
             if (android.os.SystemClock.uptimeMillis() - lastCheckpoint >= 5000) checkpoint()
@@ -103,7 +130,6 @@ class PlayerActivity : AppCompatActivity() {
         } else {
             loadSource(bvid, cid)
             loadDanmaku(cid)
-            loadPreview(bvid, cid)
             loadPlayerInfo(bvid, cid)
         }
     }
@@ -123,6 +149,9 @@ class PlayerActivity : AppCompatActivity() {
             setOnClickListener { controls.toggleVisibility() }
         }
         root.addView(playerView, FrameLayout.LayoutParams(-1, -1))
+        playerView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            updateDanmakuViewport()
+        }
         danmakuOverlay = DanmakuOverlay(this)
         root.addView(danmakuOverlay, FrameLayout.LayoutParams(-1, -1))
         subtitleOverlay = SubtitleOverlay(this)
@@ -134,7 +163,6 @@ class PlayerActivity : AppCompatActivity() {
             setBackgroundColor(0x990B0E12.toInt())
         }
         actionRail.addView(actionButton("画质") { showQualityChooser() })
-        actionRail.addView(actionButton("编码") { showCodecChooser() })
         actionRail.addView(actionButton("音轨") { showAudioChooser() })
         actionRail.addView(actionButton("倍速") { showSpeedChooser() })
         actionRail.addView(actionButton("字幕") { showSubtitleChooser() })
@@ -168,10 +196,29 @@ class PlayerActivity : AppCompatActivity() {
             },
             seekPlayback = { target -> player?.seekTo(target); updatePlaybackUi() },
             focusVideo = { root.requestFocus() })
-        controls.setPreviewSource(null, PreviewLoader::load)
         root.addView(controls, FrameLayout.LayoutParams(-1, -1))
         root.post { if (errorView?.visibility != View.VISIBLE && !isDestroyed) controls.showControls() }
+        root.post { updateDanmakuViewport() }
         return root
+    }
+
+    private fun updateDanmakuViewport() {
+        if (!::danmakuOverlay.isInitialized || !::playerView.isInitialized) return
+        val surface = playerView.videoSurfaceView
+        if (surface == null || surface.width <= 0 || surface.height <= 0) {
+            danmakuOverlay.setVideoBounds(null)
+            return
+        }
+        val overlayLocation = IntArray(2)
+        val surfaceLocation = IntArray(2)
+        danmakuOverlay.getLocationOnScreen(overlayLocation)
+        surface.getLocationOnScreen(surfaceLocation)
+        danmakuOverlay.setVideoBounds(android.graphics.RectF(
+            (surfaceLocation[0] - overlayLocation[0]).toFloat(),
+            (surfaceLocation[1] - overlayLocation[1]).toFloat(),
+            (surfaceLocation[0] - overlayLocation[0] + surface.width).toFloat(),
+            (surfaceLocation[1] - overlayLocation[1] + surface.height).toFloat(),
+        ))
     }
 
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
@@ -186,7 +233,11 @@ class PlayerActivity : AppCompatActivity() {
             exo?.playWhenReady == true && exo.playbackState != Player.STATE_ENDED, sourceReady)
     }
 
-    private fun loadSource(bvid: String, cid: Long) {
+    private fun loadSource(bvid: String, cid: Long, automaticRefresh: Boolean = false) {
+        if (!automaticRefresh) {
+            sourceRefreshAttempted = false
+            routeRecoveryAttempted.clear()
+        }
         checkpoint()
         val position = player?.currentPosition?.takeIf { sourceReady } ?: resumePosition
         val generation = ++loadGeneration
@@ -204,15 +255,6 @@ class PlayerActivity : AppCompatActivity() {
         if (!accepted) showError("播放请求繁忙，请稍后重试或返回")
     }
 
-    private fun loadPreview(bvid: String, cid: Long) {
-        AppExecutors.io.execute {
-            val result = runCatching { api.getVideoPreview(bvid, cid) }.getOrNull()
-            runOnUiThread {
-                if (!isDestroyed && ::controls.isInitialized) controls.setPreviewSource(result, PreviewLoader::load)
-            }
-        }
-    }
-
     private fun loadPlayerInfo(bvid: String, cid: Long) {
         AppExecutors.io.execute {
             val result = runCatching { api.getPlayerInfo(bvid, cid) }
@@ -227,8 +269,29 @@ class PlayerActivity : AppCompatActivity() {
         if (sourceReady) resumePosition = player?.currentPosition ?: resumePosition
         val keepPlaying = player?.playWhenReady ?: resumeOnForeground
         checkpoint()
-        val dataSourceFactory = DefaultHttpDataSource.Factory()
+        val settings = AppSettings.load(this)
+        val restrictToSingleRoute = !settings.autoRouteSwitchEnabled || settings.routePolicy == AppSettings.RoutePolicy.PRIMARY_ONLY
+        val activeRoutes = if (restrictToSingleRoute) {
+            source.routeSet.selectedRoute?.let { source.routeSet.copy(routes = listOf(it), selectedRouteId = it.id) }
+        } else {
+            source.routeSet
+        } ?: PlaybackRouteSet()
+        val effectiveSource = source.copy(routeSet = activeRoutes)
+        effectiveSource.routeSet.selectedRoute?.id?.let { routeRecoveryAttempted += it }
+        val routeState = AtomicReference(activeRoutes)
+        PlaybackDiagnosticsStore.setRouteSet(activeRoutes)
+        PlaybackDiagnosticsStore.update(PlaybackDiagnosticsSnapshot(
+            routeId = activeRoutes.selectedRoute?.id,
+            routeHost = activeRoutes.selectedRoute?.displayHost ?: "未选择",
+            bufferingCount = 0,
+            bufferingMs = 0L,
+            switchCount = routeSwitchCount,
+        ))
+        firstFrameStartedAt = android.os.SystemClock.elapsedRealtime()
+        val delegateFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(CDN_USER_AGENT)
+            .setConnectTimeoutMs(3_000)
+            .setReadTimeoutMs(5_000)
             .setDefaultRequestProperties(
                 mapOf(
                     "Referer" to "https://www.bilibili.com/",
@@ -236,6 +299,29 @@ class PlayerActivity : AppCompatActivity() {
                     "Accept" to "*/*",
                 ),
             )
+        val dataSourceFactory = RouteAwareDataSource.Factory(
+            delegateFactory,
+            routeState,
+            onRouteSwitched = { _, candidate, _ ->
+                val route = routeState.get().routeForUrl(candidate)
+                runOnUiThread {
+                    if (isDestroyed) return@runOnUiThread
+                    routeSwitchCount++
+                    route?.let {
+                        routeRecoveryAttempted += it.id
+                        currentSource = currentSource?.copy(routeSet = currentSource?.routeSet?.select(it.id) ?: routeState.get().select(it.id))
+                        PlaybackDiagnosticsStore.setRouteSet(currentSource?.routeSet ?: routeState.get())
+                        PlaybackDiagnosticsStore.recordRoute(it.id, it.displayHost, routeSwitchCount)
+                    }
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (now - lastRouteToastAt > 1_000L) {
+                        lastRouteToastAt = now
+                        Toast.makeText(this, "已切换至${route?.displayName ?: "备用线路"}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            },
+            promoteRoute = settings.routePolicy == AppSettings.RoutePolicy.AUTO,
+        )
         player?.release()
         sourceReady = false
         trackSelector = DefaultTrackSelector(this)
@@ -249,10 +335,28 @@ class PlayerActivity : AppCompatActivity() {
                 exoPlayer.addListener(object : Player.Listener {
                     override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
                         danmakuOverlay.videoAspectRatio = if (videoSize.height > 0) videoSize.width * videoSize.pixelWidthHeightRatio / videoSize.height else 0f
+                        playerView.post { updateDanmakuViewport() }
                     }
                     override fun onPlaybackStateChanged(playbackState: Int) {
+                        if (lastPlaybackState != Player.STATE_BUFFERING && playbackState == Player.STATE_BUFFERING) {
+                            bufferingCount++
+                            bufferingStartedAt = android.os.SystemClock.elapsedRealtime()
+                        } else if (lastPlaybackState == Player.STATE_BUFFERING && playbackState != Player.STATE_BUFFERING && bufferingStartedAt > 0L) {
+                            bufferingMs += (android.os.SystemClock.elapsedRealtime() - bufferingStartedAt).coerceAtLeast(0L)
+                            bufferingStartedAt = 0L
+                        }
+                        lastPlaybackState = playbackState
+                        val active = routeState.get().selectedRoute
+                        PlaybackDiagnosticsStore.update(PlaybackDiagnosticsStore.snapshot().copy(
+                            routeId = active?.id,
+                            routeHost = active?.displayHost ?: "未选择",
+                            bufferingCount = bufferingCount,
+                            bufferingMs = bufferingMs,
+                            switchCount = routeSwitchCount,
+                        ))
                         if (playbackState == Player.STATE_READY) {
                             sourceReady = true
+                            sourceRefreshAttempted = false
                             val recovering = errorView?.visibility == View.VISIBLE
                             errorView?.visibility = View.GONE
                             if (recovering) controls.resumeControls()
@@ -262,14 +366,50 @@ class PlayerActivity : AppCompatActivity() {
                         updatePlaybackUi()
                     }
 
+                    override fun onRenderedFirstFrame() {
+                        val elapsed = (android.os.SystemClock.elapsedRealtime() - firstFrameStartedAt).coerceAtLeast(0L)
+                        val selected = routeState.get().selectedRoute
+                        PlaybackDiagnosticsStore.update(PlaybackDiagnosticsSnapshot(
+                            routeId = selected?.id,
+                            routeHost = selected?.displayHost ?: "未选择",
+                            firstFrameMs = elapsed,
+                            bufferingCount = bufferingCount,
+                            bufferingMs = bufferingMs,
+                            switchCount = routeSwitchCount,
+                        ))
+                    }
+
                     override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { updatePlaybackUi() }
                     override fun onIsPlayingChanged(isPlaying: Boolean) { if (!isPlaying) checkpoint(); updatePlaybackUi() }
 
                     override fun onPlayerError(error: PlaybackException) {
-                        showError("播放失败：${error.errorCodeName}\n请重试或切换清晰度")
+                        PlaybackDiagnosticsStore.update(PlaybackDiagnosticsSnapshot(
+                            routeId = routeState.get().selectedRoute?.id,
+                            routeHost = routeState.get().selectedRoute?.displayHost ?: "未选择",
+                            firstFrameMs = PlaybackDiagnosticsStore.snapshot().firstFrameMs,
+                            bufferingCount = bufferingCount,
+                            bufferingMs = bufferingMs,
+                            switchCount = routeSwitchCount,
+                            lastError = "${error.errorCodeName}: ${error.message.orEmpty()}".take(180),
+                        ))
+                        val settings = AppSettings.load(this@PlayerActivity)
+                        if (settings.autoRouteSwitchEnabled && isRouteRecoverableError(error)) {
+                            if (tryNextRouteRecovery()) return
+                            if (!sourceRefreshAttempted) {
+                                sourceRefreshAttempted = true
+                                Toast.makeText(this@PlayerActivity, "线路均不可用，正在刷新播放地址…", Toast.LENGTH_SHORT).show()
+                                loadSource(currentBvid, currentCid, automaticRefresh = true)
+                                return
+                            }
+                        }
+                        val codec = settings.videoCodec
+                        val codecHint = if (codec != AppSettings.VideoCodec.AUTO && !isNetworkPlaybackError(error)) {
+                            "\n当前指定编码为${codec.label}，可切换为自动编码后重试。"
+                        } else ""
+                        showError("播放失败：${error.errorCodeName}$codecHint\n请重试或切换清晰度")
                     }
                 })
-                val mediaSource = createMediaSource(mediaSourceFactory, source)
+                val mediaSource = createMediaSource(mediaSourceFactory, effectiveSource)
                 if (mediaSource == null) {
                     showError("播放源为空，请切换画质或格式")
                     return@also
@@ -284,13 +424,14 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun createMediaSource(factory: DefaultMediaSourceFactory, source: PlaySource): MediaSource? {
+        val selectedRoute = source.routeSet.selectedRoute
         if (source.isDash && source.videoTrack != null && source.audioTrack != null) {
             val video = MediaItem.Builder()
-                .setUri(source.videoTrack.url)
+                .setUri(selectedRoute?.videoUrl ?: source.videoTrack.url)
                 .setMimeType(MimeTypes.VIDEO_MP4)
                 .build()
             val audio = MediaItem.Builder()
-                .setUri(source.audioTrack.url)
+                .setUri(selectedRoute?.audioUrl ?: source.audioTrack.url)
                 .setMimeType(MimeTypes.AUDIO_MP4)
                 .build()
             return MergingMediaSource(
@@ -298,9 +439,10 @@ class PlayerActivity : AppCompatActivity() {
                 factory.createMediaSource(audio),
             )
         }
-        if (source.url.isBlank()) return null
+        val url = selectedRoute?.videoUrl ?: source.url
+        if (url.isBlank()) return null
         return factory.createMediaSource(
-            MediaItem.Builder().setUri(source.url).setMimeType(source.mimeType).build(),
+            MediaItem.Builder().setUri(url).setMimeType(source.mimeType).build(),
         )
     }
 
@@ -315,7 +457,12 @@ class PlayerActivity : AppCompatActivity() {
     private fun showQualityChooser() {
         val settings = AppSettings.load(this)
         val allOptions = currentSource?.availableQualities.orEmpty()
-        val options = allOptions.filter { it.deviceSupported || settings.experimentalQualityEnabled }
+        // The player chooses resolution only. Experimental, unverified tracks are
+        // shown only when the user explicitly selected a codec; AUTO must never
+        // silently choose an AV1/software-only track just because it is larger.
+        val options = allOptions.filter {
+            it.deviceSupported || (settings.experimentalQualityEnabled && settings.videoCodec != AppSettings.VideoCodec.AUTO)
+        }
         if (options.isEmpty()) {
             Toast.makeText(this, "当前播放源没有可切换画质，请先重试获取播放能力", Toast.LENGTH_SHORT).show()
             return
@@ -335,32 +482,11 @@ class PlayerActivity : AppCompatActivity() {
     private fun qualityOptionLabel(option: PlaybackQuality): String {
         val tags = buildList {
             if (option.isDolbyVision) add("Dolby Vision") else if (option.isHdr) add("HDR")
-            option.codecs.firstOrNull()?.let { codec ->
-                when {
-                    codec.startsWith("av01", ignoreCase = true) -> add("AV1")
-                    codec.startsWith("hev", ignoreCase = true) || codec.startsWith("hvc", ignoreCase = true) -> add("HEVC")
-                    codec.startsWith("avc", ignoreCase = true) -> add("AVC")
-                    else -> Unit
-                }
-            }
             if (!option.deviceSupported) add("实验性")
             if (option.needsVip) add("大会员") else if (option.needsLogin) add("需登录")
         }
         val base = option.label.ifBlank { "画质 ${option.id}" }
         return if (tags.isEmpty()) base else "$base · ${tags.joinToString("/")}"
-    }
-
-    private fun showCodecChooser() {
-        val options = AppSettings.VideoCodec.entries.toList()
-        val current = AppSettings.load(this).videoCodec
-        showControlDialog(androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("选择视频编码")
-            .setSingleChoiceItems(options.map { it.label }.toTypedArray(), options.indexOf(current).coerceAtLeast(0)) { dialog, which ->
-                AppSettings.load(this).copy(videoCodec = options[which]).save(this)
-                dialog.dismiss()
-                loadSource(currentBvid, currentCid)
-            }
-            .create())
     }
 
     private fun showAudioChooser() {
@@ -374,7 +500,15 @@ class PlayerActivity : AppCompatActivity() {
         showControlDialog(androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("选择音轨")
             .setSingleChoiceItems(labels, tracks.indexOfFirst { it.id == currentId }.coerceAtLeast(0)) { dialog, which ->
-                currentSource = currentSource?.copy(audioTrack = tracks[which])
+                val source = currentSource
+                val selected = tracks[which]
+                if (source != null && source.videoTrack != null) {
+                    val routeSet = PlaybackRouteSet.fromUrls(
+                        listOf(source.videoTrack.url) + source.videoTrack.backupUrls,
+                        listOf(selected.url) + selected.backupUrls,
+                    ).select(source.routeSet.selectedRoute?.id ?: "route-0")
+                    currentSource = source.copy(audioTrack = selected, routeSet = routeSet)
+                }
                 currentSource?.let(::startPlayer)
                 dialog.dismiss()
             }
@@ -476,13 +610,72 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun showLineInfo() {
-        val url = currentSource?.videoTrack?.url ?: currentSource?.url.orEmpty()
-        val host = runCatching { java.net.URI(url).host }.getOrNull().orEmpty().ifBlank { "自动选择" }
-        showControlDialog(androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("播放线路")
-            .setMessage("当前线路：$host\n\n播放器会自动携带备用地址并在失败时回退。线路测速和手动切换将在真实设备网络验证后开放。")
-            .setPositiveButton("知道了", null)
-            .create())
+        val source = currentSource
+        val routes = source?.routeSet?.routes.orEmpty()
+        val settings = AppSettings.load(this)
+        val visibleRoutes = if (settings.routePolicy == AppSettings.RoutePolicy.PRIMARY_ONLY) routes.take(1) else routes
+        val currentId = source?.routeSet?.selectedRoute?.id
+        val probes = PlaybackDiagnosticsStore.probes()
+        val labels = visibleRoutes.map { route ->
+            val probe = probes[route.id]
+            val status = probe?.let { " · ${if (it.success) it.video.grade else "失败"}" }.orEmpty()
+            "${route.displayName}$status${if (route.id == currentId) " · 当前" else ""}"
+        }.toTypedArray()
+        val builder = androidx.appcompat.app.AlertDialog.Builder(this).setTitle("播放线路")
+            .setNegativeButton("网络诊断") { _, _ -> startActivity(android.content.Intent(this, NetworkDiagnosticsActivity::class.java)) }
+            .setPositiveButton("关闭", null)
+        if (visibleRoutes.isEmpty()) {
+            builder.setMessage("当前播放源没有返回可用线路。\n\n可打开网络诊断查看本次播放会话，或重试获取新的播放地址。")
+        } else {
+            builder.setSingleChoiceItems(labels, visibleRoutes.indexOfFirst { it.id == currentId }.coerceAtLeast(0)) { dialog, which ->
+                val selected = visibleRoutes[which]
+                val current = currentSource
+                if (current != null) {
+                    sourceRefreshAttempted = false
+                    currentSource = current.copy(routeSet = current.routeSet.select(selected.id))
+                    PlaybackDiagnosticsStore.setRouteSet(currentSource!!.routeSet)
+                    startPlayer(currentSource!!)
+                }
+                dialog.dismiss()
+            }
+        }
+        showControlDialog(builder.create())
+    }
+
+    private fun isNetworkPlaybackError(error: PlaybackException): Boolean {
+        if (error.errorCode in setOf(
+                PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+                PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+                PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+                PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND,
+            )) return true
+        var cause: Throwable? = error
+        while (cause != null) {
+            if (cause is HttpDataSource.HttpDataSourceException ||
+                cause is SocketTimeoutException || cause is UnknownHostException || cause is ConnectException
+            ) return true
+            cause = cause.cause
+        }
+        return false
+    }
+
+    /** Route-level recovery also covers a malformed segment/manifest from one CDN, but never decoder errors. */
+    private fun isRouteRecoverableError(error: PlaybackException): Boolean =
+        isNetworkPlaybackError(error) ||
+            error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED
+
+    private fun tryNextRouteRecovery(): Boolean {
+        val source = currentSource ?: return false
+        val routes = source.routeSet.routes
+        if (routes.size < 2) return false
+        val currentId = source.routeSet.selectedRoute?.id
+        currentId?.let { routeRecoveryAttempted += it }
+        val next = routes.firstOrNull { it.id != currentId && it.id !in routeRecoveryAttempted } ?: return false
+        routeRecoveryAttempted += next.id
+        currentSource = source.copy(routeSet = source.routeSet.select(next.id))
+        Toast.makeText(this, "当前线路异常，正在切换至${next.displayName}…", Toast.LENGTH_SHORT).show()
+        startPlayer(currentSource!!)
+        return true
     }
 
     private fun showControlDialog(dialog: androidx.appcompat.app.AlertDialog) {
@@ -571,11 +764,28 @@ class PlayerActivity : AppCompatActivity() {
                 Ui.focusHighlight(button)
                 actions.addView(button, LinearLayout.LayoutParams(Ui.dp(this@PlayerActivity, 160), Ui.dp(this@PlayerActivity, 46)))
             }
+            routeButton = Ui.chip(this@PlayerActivity, "选择线路", false) {
+                showLineInfo()
+            }.also { button ->
+                Ui.focusHighlight(button)
+                actions.addView(button, LinearLayout.LayoutParams(Ui.dp(this@PlayerActivity, 128), Ui.dp(this@PlayerActivity, 46)))
+            }
+            codecFallbackButton = Ui.chip(this@PlayerActivity, "切换自动编码", false) {
+                AppSettings.load(this@PlayerActivity).copy(videoCodec = AppSettings.VideoCodec.AUTO).save(this@PlayerActivity)
+                visibility = View.GONE
+                controls.resumeControls()
+                loadSource(currentBvid, currentCid)
+            }.also { button ->
+                Ui.focusHighlight(button)
+                actions.addView(button, LinearLayout.LayoutParams(Ui.dp(this@PlayerActivity, 172), Ui.dp(this@PlayerActivity, 46)))
+            }
             addView(actions, LinearLayout.LayoutParams(-1, -2))
             root.addView(this, FrameLayout.LayoutParams(-1, -1))
         }
         errorMessageView?.text = "$message\n\n可重试当前画质；如果画面黑屏或解码失败，请切换到低一级画质。返回键退出播放。"
         lowerQualityButton?.visibility = if (lowerQualityOption() == null) View.GONE else View.VISIBLE
+        routeButton?.visibility = if (currentSource?.routeSet?.hasAlternates == true) View.VISIBLE else View.GONE
+        codecFallbackButton?.visibility = if (AppSettings.load(this).videoCodec != AppSettings.VideoCodec.AUTO) View.VISIBLE else View.GONE
         panel.visibility = View.VISIBLE
         retryButton?.requestFocus()
     }
@@ -614,6 +824,7 @@ class PlayerActivity : AppCompatActivity() {
         resumeOnForeground = player?.playWhenReady ?: true
         player?.pause()
         tickerHandler.removeCallbacks(ticker)
+        tickerHandler.removeCallbacks(danmakuTicker)
         super.onPause()
     }
 
@@ -624,6 +835,8 @@ class PlayerActivity : AppCompatActivity() {
         updateDanmakuButton()
         tickerHandler.removeCallbacks(ticker)
         tickerHandler.post(ticker)
+        tickerHandler.removeCallbacks(danmakuTicker)
+        tickerHandler.postDelayed(danmakuTicker, 16L)
         if (resumeOnForeground) player?.play()
         updatePlaybackUi()
         if (errorView?.visibility != View.VISIBLE) controls.resumeControls() else controls.suspendControls()

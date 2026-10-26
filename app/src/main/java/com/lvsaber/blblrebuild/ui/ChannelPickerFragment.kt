@@ -30,14 +30,16 @@ class ChannelPickerFragment : DialogFragment() {
             setBackgroundColor(Ui.background)
         }
         root.addView(Ui.text(context, "更多频道", 26f))
-        root.addView(Ui.text(context, "方向键选择 · 确定进入 · 返回关闭", 13f, Ui.muted))
+        root.addView(Ui.text(context, "未固定频道 · 选择后直接进入，不会自动占用顶部名额", 13f, Ui.muted))
         val columns = if (resources.configuration.screenWidthDp >= 800) 4 else 3
         val grid = GridLayout(context).apply { columnCount = columns }
         var selected: android.view.View? = null
         val buttons = mutableListOf<android.view.View>()
-        ChannelCatalog.normalize(settings.channelOrder, ChannelCatalog.keys).forEachIndexed { index, key ->
+        ChannelCatalog.normalize(settings.channelOrder, ChannelCatalog.keys)
+            .filter { it in settings.hiddenTopChannels }
+            .forEachIndexed { index, key ->
             val channel = ChannelCatalog.find(key) ?: return@forEachIndexed
-            val mark = if (key == current) "正在浏览" else if (key !in settings.hiddenTopChannels) "顶部" else "进入频道"
+            val mark = if (key == current) "正在浏览" else "进入频道"
             val button = Ui.chip(context, "${channel.symbol}  ${channel.title}\n$mark", key == current) {
                 dismiss()
                 (activity as? MainActivity)?.selectChannel(key)

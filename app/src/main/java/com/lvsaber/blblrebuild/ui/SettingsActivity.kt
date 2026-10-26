@@ -25,7 +25,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private val sheetCache = mutableMapOf<String, Pair<NestedScrollView, LinearLayout>>()
-    private val categories = linkedMapOf("appearance" to "外观与布局", "channels" to "频道与轨道", "browse" to "浏览与加载", "playback" to "播放", "danmaku" to "弹幕", "account" to "账号与存储", "about" to "关于")
+    private val categories = linkedMapOf("appearance" to "外观与布局", "channels" to "频道与轨道", "browse" to "浏览与加载", "playback" to "播放", "network" to "网络与线路", "danmaku" to "弹幕", "account" to "账号与存储", "about" to "关于")
     private val categoryButtons = mutableMapOf<String, Button>()
     private lateinit var sheetHost: android.widget.FrameLayout
     private var selectedSheet = "appearance"
@@ -184,7 +184,7 @@ class SettingsActivity : AppCompatActivity() {
                     addChoiceRow("默认封装格式", "MP4 兼容 / DASH 独立音视频", AppSettings.VideoFormat.entries.toList(), settings.videoFormat) {
                         settings = settings.copy(videoFormat = it); saveAndRefresh()
                     }
-                    addChoiceRow("默认视频编码", "编码不可用时回退", AppSettings.VideoCodec.entries.toList(), settings.videoCodec) {
+                    addChoiceRow("默认视频编码", "自动按 H.264 → H.265 → AV1；指定后不跨编码回退", AppSettings.VideoCodec.entries.toList(), settings.videoCodec) {
                         settings = settings.copy(videoCodec = it); saveAndRefresh()
                     }
                     addChoiceRow("画面比例", "播放器默认显示方式", AppSettings.VideoResizeMode.entries.toList(), settings.videoResizeMode) {
@@ -198,6 +198,22 @@ class SettingsActivity : AppCompatActivity() {
                         settings = settings.copy(experimentalQualityEnabled = it); saveAndRefresh()
                     }
                     content.addView(Ui.text(this, "关闭时按当前设备的解码器、最大分辨率、帧率和 HDR 显示能力过滤；开启后允许在播放器中手动尝试服务端返回但设备未明确声明支持的轨道。实验性轨道不会被自动模式优先选择。", 13f, Ui.muted))
+                }
+                "network" -> {
+                    addBooleanRow("播放失败自动切换线路", settings.autoRouteSwitchEnabled) {
+                        settings = settings.copy(autoRouteSwitchEnabled = it); saveAndRefresh()
+                    }
+                    addChoiceRow("线路策略", "签名地址只在当前播放会话中使用，不固定保存 CDN 域名。", AppSettings.RoutePolicy.entries.toList(), settings.routePolicy) {
+                        settings = settings.copy(routePolicy = it); saveAndRefresh()
+                    }
+                    content.addView(Ui.text(this, "自动切换只处理连接、超时和 HTTP 线路错误；解码器、HDR 和会员权限错误不会误切 CDN。测速仅在你主动触发时执行。", 13f, Ui.muted))
+                    content.addView(Ui.button(this, "打开网络诊断") {
+                        startActivity(android.content.Intent(this, NetworkDiagnosticsActivity::class.java))
+                    })
+                    content.addView(Ui.button(this, "清除线路诊断结果") {
+                        com.lvsaber.blblrebuild.data.PlaybackDiagnosticsStore.clearProbes()
+                        android.widget.Toast.makeText(this, "线路诊断结果已清除", android.widget.Toast.LENGTH_SHORT).show()
+                    })
                 }
                 "danmaku" -> {
                     addBooleanRow("默认显示弹幕", settings.danmakuEnabled) { settings = settings.copy(danmakuEnabled = it); saveAndRefresh() }
@@ -248,12 +264,13 @@ class SettingsActivity : AppCompatActivity() {
                     content.addView(Ui.text(this, "悬浮导航 · 历史回看 · 全局续播\n观看进度保存在本机；登录后按需读取云端历史。", 15f, Ui.muted))
                 }
             }
-            if (key in setOf("appearance", "browse", "playback", "danmaku")) content.addView(Ui.chip(this, "恢复本页默认设置", false) {
+            if (key in setOf("appearance", "browse", "playback", "network", "danmaku")) content.addView(Ui.chip(this, "恢复本页默认设置", false) {
                 confirm("恢复${categories[key]}的默认设置？") {
                     val defaults = AppSettings()
                     settings = when (key) {
                         "appearance" -> settings.copy(homeStyle = defaults.homeStyle, gridColumns = defaults.gridColumns, heroEnabled = defaults.heroEnabled)
                         "browse" -> settings.copy(railPrefetchEnabled = defaults.railPrefetchEnabled)
+                        "network" -> settings.copy(autoRouteSwitchEnabled = defaults.autoRouteSwitchEnabled, routePolicy = defaults.routePolicy)
                         "danmaku" -> settings.copy(danmakuEnabled = defaults.danmakuEnabled, danmaku = defaults.danmaku)
                         else -> settings.copy(defaultQuality = defaults.defaultQuality, videoFormat = defaults.videoFormat, videoCodec = defaults.videoCodec,
                             videoResizeMode = defaults.videoResizeMode, subtitleTextScale = defaults.subtitleTextScale)
@@ -283,16 +300,29 @@ class SettingsActivity : AppCompatActivity() {
         val anchor = Ui.text(this, "频道管理", 22f, Ui.text)
         anchor.tag = "channel-management"
         content.addView(anchor)
-        content.addView(Ui.text(this, "固定频道显示在顶部；其余频道仍可从“更多频道”进入。调整后自动保存。", 13f, Ui.muted))
+        content.addView(Ui.text(this, "最多固定 ${ChannelCatalog.MAX_PINNED} 个频道显示在顶部；其余频道仍可从“更多频道”进入。调整后自动保存。", 13f, Ui.muted))
         val topHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(topHost)
         fun renderTop(focus: String? = null) {
             val keys = ChannelCatalog.normalize(settings.channelOrder, ChannelCatalog.keys)
             renderManagedRows(topHost, keys, { ChannelCatalog.find(it)?.title.orEmpty() },
-                { it !in settings.hiddenTopChannels }, "固定", "更多", focus,
+                { it !in settings.hiddenTopChannels }, "取消固定", "固定", focus,
                 toggle = { key ->
                     val hidden = settings.hiddenTopChannels.toMutableSet()
-                    if (!hidden.add(key)) hidden.remove(key)
+                    if (key !in hidden) {
+                        hidden.add(key)
+                    } else {
+                        val pinnedCount = keys.count { it !in hidden }
+                        if (pinnedCount >= ChannelCatalog.MAX_PINNED) {
+                            android.widget.Toast.makeText(
+                                this,
+                                "顶部最多固定 ${ChannelCatalog.MAX_PINNED} 个频道，请先取消一个。",
+                                android.widget.Toast.LENGTH_SHORT,
+                            ).show()
+                            return@renderManagedRows
+                        }
+                        hidden.remove(key)
+                    }
                     settings = settings.copy(hiddenTopChannels = hidden)
                     settings.save(this)
                     renderTop("$key/toggle")
@@ -508,6 +538,7 @@ class SettingsActivity : AppCompatActivity() {
         is AppSettings.HomeStyle -> value.label
         is AppSettings.VideoFormat -> value.label
         is AppSettings.VideoCodec -> value.label
+        is AppSettings.RoutePolicy -> value.label
         is QualityOption -> value.label
         is DisplayOption<*> -> value.label
         is com.lvsaber.blblrebuild.data.ChannelDefinition -> value.title

@@ -25,6 +25,8 @@ class DanmakuOverlay(context: Context) : View(context) {
     private data class Placed(val item: DanmakuItem, val lane: Int, val width: Float)
     private var placed: List<Placed> = emptyList()
     private val viewport = RectF()
+    private val videoBounds = RectF()
+    private var hasVideoBounds = false
     private var laneHeight = 0f
     private var baseline = 0f
     var displaySettings: DanmakuSettings = DanmakuSettings()
@@ -41,10 +43,29 @@ class DanmakuOverlay(context: Context) : View(context) {
             field = safe
             rebuildLayout()
         }
+
+    /**
+     * Uses the actual Media3 surface bounds when available. This avoids putting
+     * danmaku in the full window's top-left letterbox area on non-16:9 videos.
+     */
+    fun setVideoBounds(bounds: RectF?) {
+        if (bounds == null || bounds.width() <= 0f || bounds.height() <= 0f) {
+            if (!hasVideoBounds) return
+            hasVideoBounds = false
+        } else {
+            if (hasVideoBounds && videoBounds == bounds) return
+            videoBounds.set(bounds)
+            hasVideoBounds = true
+        }
+        rebuildLayout()
+    }
     var positionMs: Long = 0L
         set(value) {
+            if (field == value) return
             field = value
-            invalidate()
+            // Align drawing with display frames instead of invalidating at an
+            // arbitrary 100ms timer cadence.
+            postInvalidateOnAnimation()
         }
     var overlayEnabled: Boolean = true
         set(value) {
@@ -66,7 +87,9 @@ class DanmakuOverlay(context: Context) : View(context) {
     private fun rebuildLayout() {
         viewport.set(0f, 0f, width.toFloat(), height.toFloat())
         if (width <= 0 || height <= 0) { placed = emptyList(); return }
-        if (videoAspectRatio > 0) {
+        if (hasVideoBounds) {
+            viewport.set(videoBounds)
+        } else if (videoAspectRatio > 0) {
             if (width.toFloat() / height > videoAspectRatio) {
                 val inset = (width - height * videoAspectRatio) / 2
                 viewport.inset(inset, 0f)
@@ -76,6 +99,7 @@ class DanmakuOverlay(context: Context) : View(context) {
             }
         }
         paint.textSize = Ui.dp(context, 18) * displaySettings.textScale
+        paint.setShadowLayer(3f, 1f, 1f, android.graphics.Color.argb((255 * displaySettings.opacityPercent / 100).coerceIn(0, 255), 0, 0, 0))
         laneHeight = paint.fontSpacing + Ui.dp(context, 6)
         val padding = Ui.dp(context, 8).toFloat()
         baseline = viewport.top + padding - paint.fontMetrics.ascent
@@ -134,11 +158,23 @@ class DanmakuOverlay(context: Context) : View(context) {
         val save = canvas.save()
         canvas.clipRect(viewport.left, viewport.top, viewport.right, viewport.top + viewport.height() * displaySettings.areaPercent / 100)
         val alpha = (255 * displaySettings.opacityPercent / 100).coerceIn(0, 255)
-        paint.setShadowLayer(3f, 1f, 1f, android.graphics.Color.argb(alpha, 0, 0, 0))
-        frameAt(positionMs).forEach { item ->
-            paint.color = item.color
+        val duration = displaySettings.durationMs
+        var low = 0
+        var high = placed.size
+        while (low < high) {
+            val middle = (low + high).ushr(1)
+            if (placed[middle].item.timeMs <= positionMs - duration) low = middle + 1 else high = middle
+        }
+        var index = low
+        var visible = 0
+        while (index < placed.size && placed[index].item.timeMs <= positionMs && visible < displaySettings.maxVisible) {
+            val entry = placed[index++]
+            val elapsed = positionMs - entry.item.timeMs
+            val x = viewport.left + viewport.width() - elapsed.toFloat() / duration * (viewport.width() + entry.width)
+            paint.color = entry.item.color
             paint.alpha = alpha
-            canvas.drawText(item.text, item.x, item.baseline, paint)
+            canvas.drawText(entry.item.text, x, baseline + laneHeight * entry.lane, paint)
+            visible++
         }
         canvas.restoreToCount(save)
     }

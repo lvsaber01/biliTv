@@ -43,6 +43,13 @@ object AppExecutors {
         allowCoreThreadTimeOut(true)
     }
 
+    /** User-triggered route probes must never execute network IO on the UI thread. */
+    val diagnostics: ThreadPoolExecutor = ThreadPoolExecutor(
+        1, 2, 20L, TimeUnit.SECONDS, LinkedBlockingQueue(8),
+        ThreadFactory { runnable -> Thread(runnable, "bili-diagnostics-${threadNumber.getAndIncrement()}").apply { isDaemon = true } },
+        ThreadPoolExecutor.AbortPolicy(),
+    ).apply { allowCoreThreadTimeOut(true) }
+
     /** Rapid channel switches must never run overflow network tasks on the UI thread. */
     val browse: ThreadPoolExecutor = ThreadPoolExecutor(
         2, 3, 30L, TimeUnit.SECONDS, LinkedBlockingQueue(24),

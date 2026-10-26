@@ -42,25 +42,33 @@ class MainActivity : AppCompatActivity() {
     private var currentKey = "home"
     private var searchToken = 0
     private var accountFocusTag: String? = null
+    private var historyReturnKey = "home"
+    private var historyReturnFocusTag: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         api = BiliApiClient(this)
         settings = AppSettings.load(this)
+        historyReturnKey = savedInstanceState?.getString("history_return_key", "home") ?: "home"
+        historyReturnFocusTag = savedInstanceState?.getString("history_return_focus")
         setContentView(buildRoot())
         when (val saved = savedInstanceState?.getString("channel")) {
             "history" -> showHistory(); "me" -> showMe(); "search" -> showSearch(); else -> selectChannel(saved ?: "home")
         }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (currentKey != "home") selectChannel("home") else { isEnabled = false; onBackPressedDispatcher.onBackPressed() }
+                if (currentKey == "history") returnFromHistory()
+                else if (currentKey != "home") selectChannel("home")
+                else { isEnabled = false; onBackPressedDispatcher.onBackPressed() }
             }
         })
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("channel", currentKey)
+        outState.putString("history_return_key", historyReturnKey)
+        outState.putString("history_return_focus", historyReturnFocusTag)
         super.onSaveInstanceState(outState)
     }
 
@@ -198,16 +206,31 @@ class MainActivity : AppCompatActivity() {
         page.activate()
     }
 
-    private fun showHistory() {
+    private fun showHistory(originKey: String? = null, originFocusTag: String? = null) {
+        if (currentKey != "history") {
+            historyReturnKey = (originKey ?: currentKey).takeIf { it != "history" && (it == "home" || it == "me" || it == "search" || ChannelCatalog.find(it) != null) } ?: "home"
+            historyReturnFocusTag = originFocusTag ?: content.findFocus()?.tag?.toString()
+        }
         searchToken++
         pages.values.forEach { it.deactivate() }
         currentKey = "history"; updateTabs()
         if (historyPage?.accountKey != null && historyPage?.accountKey != ProgressRepository.get(this).account) {
             historyPage?.dispose(); historyPage = null
         }
-        val page = historyPage ?: LibraryPage(this, api, navigateUp = { fixedButtons["history"]?.requestFocus() }).also { historyPage = it }
+        val page = historyPage ?: LibraryPage(this, api, navigateUp = { returnFromHistory() }).also { historyPage = it }
         content.removeAllViews(); content.addView(page)
         page.refreshLocal()
+    }
+
+    private fun returnFromHistory() {
+        val key = historyReturnKey
+        val focusTag = historyReturnFocusTag
+        when (key) {
+            "me" -> showMe(focusTag)
+            "search" -> showSearch()
+            else -> selectChannel(key)
+        }
+        if (key == "home" && focusTag == null) homeButton.post { homeButton.requestFocus() }
     }
 
     fun closeChannelPicker() { moreButton.requestFocus() }
@@ -256,19 +279,19 @@ class MainActivity : AppCompatActivity() {
         input.requestFocus()
     }
 
-    private fun showMe() {
-        val restoreTag = if (currentKey == "me") content.findFocus()?.tag?.toString()?.takeIf { it.startsWith("account/") } ?: accountFocusTag else null
+    private fun showMe(restoreTagOverride: String? = null) {
+        val restoreTag = restoreTagOverride ?: if (currentKey == "me") content.findFocus()?.tag?.toString()?.takeIf { it.startsWith("account/") } ?: accountFocusTag else null
         searchToken++
         pages.values.forEach { it.deactivate() }
         currentKey = "me"; updateTabs()
-        val page = AccountPage(this, openHistory = { showHistory() },
+        val page = AccountPage(this, openHistory = { showHistory("me", "account/history") },
             openFavorites = { startActivity(Intent(this, LibraryActivity::class.java).putExtra(LibraryActivity.EXTRA_MODE, LibraryActivity.MODE_FAVORITES)) },
             openWatchLater = { startActivity(Intent(this, LibraryActivity::class.java).putExtra(LibraryActivity.EXTRA_MODE, LibraryActivity.MODE_WATCH_LATER)) },
             openFollowing = { startActivity(Intent(this, FollowingActivity::class.java)) },
             openSettings = { openSettings("appearance") })
         content.removeAllViews()
         content.addView(page)
-        restoreTag?.let { tag -> page.findViewWithTag<View>(tag)?.requestFocus() }
+        restoreTag?.let { tag -> page.post { page.findViewWithTag<View>(tag)?.requestFocus() } }
     }
 
     private class Holder(view: View) : RecyclerView.ViewHolder(view)

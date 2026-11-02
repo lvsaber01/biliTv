@@ -46,21 +46,25 @@ class MainActivity : AppCompatActivity() {
     private var accountFocusTag: String? = null
     private var historyReturnKey = "home"
     private var historyReturnFocusTag: String? = null
+    private var globalPageEntry: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         api = BiliApiClient(this)
         settings = AppSettings.load(this)
+        globalPageEntry = intent.getStringExtra(EXTRA_OPEN_PAGE)
         historyReturnKey = savedInstanceState?.getString("history_return_key", "home") ?: "home"
         historyReturnFocusTag = savedInstanceState?.getString("history_return_focus")
         setContentView(buildRoot())
-        when (val saved = savedInstanceState?.getString("channel")) {
+        when (val saved = savedInstanceState?.getString("channel") ?: intent.getStringExtra(EXTRA_OPEN_PAGE)) {
             "history" -> showHistory(); "me" -> showMe(); "search" -> showSearch(); else -> selectChannel(saved ?: "home")
         }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (currentKey == "history") returnFromHistory()
+                if (currentKey == "history" && globalPageEntry == "history" && historyReturnKey == "home") finish()
+                else if (currentKey == "history") returnFromHistory()
+                else if (globalPageEntry != null) finish()
                 else if (currentKey != "home") selectChannel("home")
                 else { isEnabled = false; onBackPressedDispatcher.onBackPressed() }
             }
@@ -133,7 +137,7 @@ class MainActivity : AppCompatActivity() {
             contentDescription = getString(R.string.app_name)
             scaleType = ImageView.ScaleType.FIT_CENTER
         }, LinearLayout.LayoutParams(Ui.dp(this, 96), Ui.dp(this, 58)))
-        homeButton = tab("首页") { selectChannel("home") }
+        homeButton = tab("专区：视频 ▾") { showZoneChooser() }
         toolbar.addView(homeButton)
         channelTabs = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         channelScroll = HorizontalScrollView(this).apply {
@@ -163,6 +167,16 @@ class MainActivity : AppCompatActivity() {
             Ui.applyFocusHighlight(view, focused)
             if (focused && parent === channelTabs) channelScroll.post { channelScroll.smoothScrollTo((left - Ui.dp(context, 12)).coerceAtLeast(0), 0) }
         }
+    }
+
+    private fun showZoneChooser() {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("切换内容专区")
+            .setItems(arrayOf("视频专区", "番剧专区")) { _, which ->
+                if (which == 0) selectChannel("home")
+                else startActivity(Intent(this, BangumiActivity::class.java))
+            }
+            .show()
     }
 
     private fun buildTabs() {
@@ -307,5 +321,9 @@ class MainActivity : AppCompatActivity() {
             layoutParams = RecyclerView.LayoutParams(-1, -2).apply { setMargins(6, 6, 6, 6) }
         })
         override fun onBindViewHolder(holder: Holder, position: Int) { (holder.itemView as VideoCard).bind(items[position]) }
+    }
+
+    companion object {
+        const val EXTRA_OPEN_PAGE = "open_global_page"
     }
 }

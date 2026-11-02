@@ -5,7 +5,9 @@ import android.content.Intent
 import android.os.SystemClock
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -28,6 +30,7 @@ import com.lvsaber.bilitv.data.ChannelDefinition
 import com.lvsaber.bilitv.data.RailBuffer
 import com.lvsaber.bilitv.data.VideoSummary
 import java.util.concurrent.RejectedExecutionException
+import kotlin.math.abs
 
 private data class RailLoadResult(
     val videos: List<VideoSummary>,
@@ -36,6 +39,139 @@ private data class RailLoadResult(
     val successfulPages: Int,
     val error: Throwable? = null,
 )
+
+internal enum class RailEdgeGesture {
+    REFRESH,
+}
+
+internal fun railEdgeGestureOnSwipe(
+    startedAtLeadingEdge: Boolean,
+    startX: Float,
+    deltaX: Float,
+    deltaY: Float,
+    touchSlop: Float,
+    safeStartInset: Float,
+    refreshZoneEnd: Float,
+    refreshDistance: Float,
+): RailEdgeGesture? {
+    if (!startedAtLeadingEdge || startX < safeStartInset || startX > refreshZoneEnd) return null
+    if (deltaX >= -refreshDistance || abs(deltaX) <= touchSlop || abs(deltaX) <= abs(deltaY)) return null
+    return RailEdgeGesture.REFRESH
+}
+
+private class RailEdgeGestureRecyclerView(
+    context: Context,
+    private val refreshEnabled: Boolean,
+    private val onEdgeGesture: (RailEdgeGesture) -> Unit,
+) : RecyclerView(context) {
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
+    private val safeStartInset = Ui.dp(context, 48).toFloat()
+    private val refreshZoneEnd = Ui.dp(context, 160).toFloat()
+    private val refreshDistance = Ui.dp(context, 72).toFloat()
+    private var downX = 0f
+    private var downY = 0f
+    private var startedAtLeadingEdge = false
+    private var refreshSwipeCaptured = false
+
+    override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
+        if (!refreshEnabled) return super.onInterceptTouchEvent(event)
+
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                downX = event.x
+                downY = event.y
+                startedAtLeadingEdge = !canScrollHorizontally(-1)
+                refreshSwipeCaptured = false
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val gesture = railEdgeGestureOnSwipe(
+                    startedAtLeadingEdge,
+                    downX,
+                    event.x - downX,
+                    event.y - downY,
+                    touchSlop,
+                    safeStartInset,
+                    refreshZoneEnd,
+                    refreshDistance,
+                )
+                if (gesture == RailEdgeGesture.REFRESH) {
+                    refreshSwipeCaptured = true
+                    stopScroll()
+                    return true
+                }
+            }
+            MotionEvent.ACTION_UP -> {
+                val gesture = railEdgeGestureOnSwipe(
+                    startedAtLeadingEdge,
+                    downX,
+                    event.x - downX,
+                    event.y - downY,
+                    touchSlop,
+                    safeStartInset,
+                    refreshZoneEnd,
+                    refreshDistance,
+                )
+                if (gesture == RailEdgeGesture.REFRESH) {
+                    refreshSwipeCaptured = true
+                    return true
+                }
+                val intercepted = super.onInterceptTouchEvent(event)
+                resetGesture()
+                return intercepted
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                val intercepted = super.onInterceptTouchEvent(event)
+                resetGesture()
+                return intercepted
+            }
+        }
+        return super.onInterceptTouchEvent(event)
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (refreshEnabled && !refreshSwipeCaptured &&
+            (event.actionMasked == MotionEvent.ACTION_MOVE || event.actionMasked == MotionEvent.ACTION_UP)
+        ) {
+            val gesture = railEdgeGestureOnSwipe(
+                startedAtLeadingEdge,
+                downX,
+                event.x - downX,
+                event.y - downY,
+                touchSlop,
+                safeStartInset,
+                refreshZoneEnd,
+                refreshDistance,
+            )
+            if (gesture == RailEdgeGesture.REFRESH) {
+                refreshSwipeCaptured = true
+                stopScroll()
+            }
+        }
+        if (!refreshSwipeCaptured) return super.onTouchEvent(event)
+        when (event.actionMasked) {
+            MotionEvent.ACTION_UP -> {
+                resetGesture()
+                // Keep the Android system-back region untouched. The deliberate refresh
+                // gesture starts inside the rail and is dispatched after touch handling.
+                post { onEdgeGesture(RailEdgeGesture.REFRESH) }
+            }
+            MotionEvent.ACTION_CANCEL -> resetGesture()
+        }
+        return true
+    }
+
+    private fun resetGesture() {
+        startedAtLeadingEdge = false
+        refreshSwipeCaptured = false
+    }
+}
+
+internal fun shouldAppendRailAtScrollEnd(
+    userScrolled: Boolean,
+    active: Boolean,
+    reachedEnd: Boolean,
+    itemCount: Int,
+): Boolean = userScrolled && active && reachedEnd && itemCount > 0
 
 /** A page keeps its data and scroll state while switching channels. */
 @UnstableApi
@@ -53,7 +189,11 @@ class BrowsePage(
         val items = mutableListOf<VideoSummary>()
         val status = Ui.text(context, "等待加载", 12f, Ui.muted)
         val retry = Ui.chip(context, "重试", false) { fetch(this, demand = true, reset = failedReset) }
-        val list = RecyclerView(context)
+        val list = RailEdgeGestureRecyclerView(context, refreshEnabled = !grid) { gesture ->
+            when (gesture) {
+                RailEdgeGesture.REFRESH -> refresh(this)
+            }
+        }
         var focusIndex = 0
         var started = false
         var loading = false
@@ -199,9 +339,18 @@ class BrowsePage(
                 override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
                     if (newState == RecyclerView.SCROLL_STATE_DRAGGING) rail.userScrolled = true
                     if (newState == RecyclerView.SCROLL_STATE_IDLE && rail.userScrolled) {
+                        val wasUserScrolled = rail.userScrolled
                         rail.userScrolled = false
-                        val atEnd = if (grid) !canScrollVertically(1) else !canScrollHorizontally(1)
-                        if (active && atEnd && rail.items.isNotEmpty()) append(rail, focusNew = false)
+                        val reachedEnd = if (grid) !canScrollVertically(1) else !canScrollHorizontally(1)
+                        if (shouldAppendRailAtScrollEnd(
+                                userScrolled = wasUserScrolled,
+                                active = active,
+                                reachedEnd = reachedEnd,
+                                itemCount = rail.items.size,
+                            )
+                        ) {
+                            append(rail, focusNew = false)
+                        }
                     }
                 }
                 override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
@@ -430,7 +579,10 @@ class BrowsePage(
         scroll.post {
             if (!active || disposed) return@post
             scroll.scrollTo(0, scrollY)
-            if (rail.items.isNotEmpty()) focusCard(rail, position, force = true)
+            if (rail.items.isNotEmpty()) {
+                (rail.list.layoutManager as? LinearLayoutManager)?.scrollToPositionWithOffset(position, 0)
+                focusCard(rail, position, force = true)
+            }
             else {
                 status(rail)
                 if (rail.status.isFocusable) rail.status.requestFocus()

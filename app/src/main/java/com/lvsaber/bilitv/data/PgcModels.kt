@@ -29,9 +29,10 @@ data class PgcSeason(
     val followStatus: Int = 0,
     val followCount: Long = 0,
     val viewCount: Long = 0,
+    val verifiedScopeByServerFilter: Boolean = false,
 ) {
     val scopeVerified: Boolean
-        get() = category == PgcCategory.GUOCHUANG || areas.any { area ->
+        get() = category == PgcCategory.GUOCHUANG || verifiedScopeByServerFilter || areas.any { area ->
             area.contains("日本", ignoreCase = true) || area.contains("Japan", ignoreCase = true)
         }
 }
@@ -116,6 +117,31 @@ data class PgcTimelineItem(
 data class PgcTimelineDay(val date: String, val dateSeconds: Long, val dayOfWeek: Int, val items: List<PgcTimelineItem>)
 data class PgcIndexPage(val items: List<PgcSeason>, val hasNext: Boolean)
 data class PgcSearchPage(val items: List<PgcSeason>, val hasNext: Boolean)
+
+object PgcPagingPolicy {
+    const val BATCH_SIZE = 24
+    const val MAX_RANKING_ITEMS = 99
+
+    fun shouldLoadMore(
+        lastVisiblePosition: Int,
+        itemCount: Int,
+        spanCount: Int,
+        hasMore: Boolean,
+        isLoading: Boolean,
+        prefetchRows: Int = 2,
+    ): Boolean {
+        if (itemCount <= 0 || lastVisiblePosition < 0 || !hasMore || isLoading) return false
+        val threshold = spanCount.coerceAtLeast(1) * prefetchRows.coerceAtLeast(1)
+        return lastVisiblePosition >= (itemCount - threshold).coerceAtLeast(0)
+    }
+
+    fun nextRankingLimit(currentLimit: Int): Int =
+        (currentLimit.coerceAtLeast(0) + BATCH_SIZE).coerceAtMost(MAX_RANKING_ITEMS)
+
+    fun nextVisibleCount(currentCount: Int, availableCount: Int, batchSize: Int = BATCH_SIZE): Int =
+        (currentCount.coerceAtLeast(0) + batchSize.coerceAtLeast(1)).coerceAtMost(availableCount.coerceAtLeast(0))
+}
+
 data class PgcHistoryCandidate(
     val seasonId: Long, val episodeId: Long, val cid: Long, val aid: Long, val bvid: String,
     val seasonTitle: String, val episodeTitle: String, val coverUrl: String,
@@ -133,7 +159,12 @@ data class PgcHistoryPage(
 )
 
 object PgcJsonParser {
-    fun parseSeasonCard(json: org.json.JSONObject, fallbackType: Int = 0): PgcSeason? {
+    fun parseSeasonCard(
+        json: org.json.JSONObject,
+        fallbackType: Int = 0,
+        allowUnknownScope: Boolean = false,
+        verifiedScopeByServerFilter: Boolean = false,
+    ): PgcSeason? {
         val seasonId = json.optLong("season_id").takeIf { it > 0 } ?: return null
         val seasonType = json.optInt("season_type", fallbackType)
         val category = PgcCategory.fromSeasonType(seasonType) ?: return null
@@ -165,15 +196,20 @@ object PgcJsonParser {
                 ?: userStatus?.optInt("status") ?: json.optInt("is_follow")),
             followCount = stat?.optLong("follow") ?: json.optLong("follow"),
             viewCount = stat?.optLong("view") ?: json.optLong("play"),
+            verifiedScopeByServerFilter = verifiedScopeByServerFilter,
         )
-        return item.takeIf { it.title.isNotBlank() && it.scopeVerified }
+        return item.takeIf { it.title.isNotBlank() && (it.scopeVerified || allowUnknownScope) }
     }
 
     fun parseDetail(root: org.json.JSONObject, requestedSeasonId: Long): PgcSeasonDetail {
         val data = root.optJSONObject("result") ?: root.optJSONObject("data") ?: org.json.JSONObject()
         val seasonId = data.optLong("season_id", requestedSeasonId)
         val seasonData = org.json.JSONObject(data.toString()).put("season_id", seasonId)
-        val card = parseSeasonCard(seasonData, data.optInt("season_type"))
+        // /pgc/view/web/season currently exposes `type`, not `season_type`.
+        // The index/rank APIs use `season_type`; accept both without guessing
+        // beyond the request's already-known category.
+        val seasonType = data.optInt("season_type", data.optInt("type"))
+        val card = parseSeasonCard(seasonData, seasonType)
             ?: throw BiliApiException(-422, "番剧分类信息不足或不在日本动画/国创范围")
         val rawSeasons = data.optJSONArray("seasons")
         val seasons = mutableListOf<PgcSeasonRef>()
@@ -205,7 +241,11 @@ object PgcJsonParser {
         return PgcSeasonDetailParts(episodes, sections)
     }
 
-    fun parseTimeline(root: org.json.JSONObject, category: PgcCategory): List<PgcTimelineDay> {
+    fun parseTimeline(
+        root: org.json.JSONObject,
+        category: PgcCategory,
+        allowUnknownScope: Boolean = false,
+    ): List<PgcTimelineDay> {
         val rows = root.optJSONArray("result") ?: root.optJSONObject("data")?.optJSONArray("list") ?: org.json.JSONArray()
         return buildList {
             for (dayIndex in 0 until rows.length()) {
@@ -216,14 +256,16 @@ object PgcJsonParser {
                         val raw = episodes.optJSONObject(index) ?: continue
                         val seasonId = raw.optLong("season_id")
                         val episodeId = raw.optLong("episode_id", raw.optLong("ep_id"))
-                        val cid = raw.optLong("cid")
-                        if (seasonId <= 0 || episodeId <= 0 || cid <= 0) continue
+                        // The timeline endpoint is schedule metadata, not a playurl
+                        // response: it omits cid and region for current entries.
+                        if (seasonId <= 0 || episodeId <= 0) continue
                         val seasonJson = org.json.JSONObject(raw.toString()).put("season_id", seasonId)
                         if (!seasonJson.has("season_type")) seasonJson.put("season_type", category.seasonType)
-                        val season = parseSeasonCard(seasonJson, category.seasonType) ?: continue
+                        val season = parseSeasonCard(seasonJson, category.seasonType, allowUnknownScope) ?: continue
                         if (season.category != category) continue
-                        val episode = PgcEpisode(seasonId, episodeId, cid, raw.optLong("aid"), raw.optString("bvid"),
-                            clean(raw.optString("index")), clean(raw.optString("title")), clean(raw.optString("index_show")),
+                        val episode = PgcEpisode(seasonId, episodeId, raw.optLong("cid"), raw.optLong("aid"), raw.optString("bvid"),
+                            clean(raw.optString("pub_index").ifBlank { raw.optString("index") }.ifBlank { raw.optString("index_show") }),
+                            clean(raw.optString("episode_title")), clean(raw.optString("title")),
                             https(raw.optString("ep_cover").ifBlank { raw.optString("cover") }),
                             raw.optInt("duration"), raw.optString("pub_time"), raw.optInt("status"),
                             clean(raw.optString("badge")), raw.optBoolean("need_vip"))
@@ -234,6 +276,27 @@ object PgcJsonParser {
             }
         }
     }
+
+    /**
+     * Timeline rows can only be shown after Japanese-region metadata is
+     * verified via the season-detail endpoint. Guochuang is identified by its
+     * dedicated timeline type and does not require a region lookup.
+     */
+    fun filterTimelineByVerifiedScopes(
+        days: List<PgcTimelineDay>,
+        verifiedSeasons: Map<Long, PgcSeason>,
+    ): List<PgcTimelineDay> = days.mapNotNull { day ->
+        val items = day.items.mapNotNull { item ->
+            val season = if (item.season.scopeVerified) item.season else verifiedSeasons[item.season.seasonId]
+            season?.takeIf { it.category == item.season.category && it.scopeVerified }
+                ?.let { item.copy(season = it) }
+        }
+        day.copy(items = items).takeIf { items.isNotEmpty() }
+    }
+
+    fun applyVerifiedScope(card: PgcSeason, metadata: PgcSeason): PgcSeason? =
+        metadata.takeIf { it.seasonId == card.seasonId && it.category == card.category && it.scopeVerified }
+            ?.let { card.copy(areas = it.areas) }
 
     fun parseHistory(root: org.json.JSONObject, cursor: HistoryCursor? = null): PgcHistoryPage {
         val data = root.optJSONObject("data") ?: org.json.JSONObject()

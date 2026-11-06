@@ -34,6 +34,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var channelScroll: HorizontalScrollView
     private lateinit var moreButton: Button
     private lateinit var homeButton: Button
+    private lateinit var recommendButton: Button
     private val navButtons = mutableMapOf<String, Button>()
     private val fixedButtons = mutableMapOf<String, Button>()
     private var historyPage: LibraryPage? = null
@@ -50,7 +51,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        Ui.keepLandscapeOnTelevision(this)
         api = BiliApiClient(this)
         settings = AppSettings.load(this)
         globalPageEntry = intent.getStringExtra(EXTRA_OPEN_PAGE)
@@ -120,41 +121,73 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() { historyPage?.dispose(); pages.values.forEach { it.dispose() }; super.onDestroy() }
 
     private fun buildRoot(): View {
+        val compact = Ui.isCompactWidth(this)
         val root = FrameLayout(this).apply {
             setBackgroundColor(Ui.background)
-            setPadding(Ui.dp(context, 20), 0, Ui.dp(context, 20), 0)
+            val horizontalPadding = Ui.dp(context, if (compact) 8 else 20)
+            setPadding(horizontalPadding, 0, horizontalPadding, 0)
         }
         content = FrameLayout(this)
-        root.addView(content, FrameLayout.LayoutParams(-1, -1).apply { topMargin = Ui.dp(this@MainActivity, 88) })
+        root.addView(content, FrameLayout.LayoutParams(-1, -1).apply {
+            topMargin = Ui.dp(this@MainActivity, if (compact) 124 else 88)
+        })
         val toolbar = LinearLayout(this).apply {
+            orientation = if (compact) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             background = Ui.roundedBackground(0xED151A21.toInt(), Ui.dp(context, 18))
             elevation = Ui.dp(context, 12).toFloat()
-            setPadding(Ui.dp(context, 10), 0, Ui.dp(context, 10), 0)
+            val horizontalPadding = Ui.dp(context, if (compact) 6 else 10)
+            setPadding(horizontalPadding, 0, horizontalPadding, 0)
         }
-        toolbar.addView(ImageView(this).apply {
+        val logo = ImageView(this).apply {
             setImageResource(R.drawable.bilitv_logo)
             contentDescription = getString(R.string.app_name)
             scaleType = ImageView.ScaleType.FIT_CENTER
-        }, LinearLayout.LayoutParams(Ui.dp(this, 96), Ui.dp(this, 58)))
+        }
         homeButton = tab("专区：视频 ▾") { showZoneChooser() }
-        toolbar.addView(homeButton)
         channelTabs = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        recommendButton = tab("推荐") { selectChannel("home") }
         channelScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             isHorizontalFadingEdgeEnabled = true
             setFadingEdgeLength(Ui.dp(context, 24))
             addView(channelTabs)
         }
-        toolbar.addView(channelScroll, LinearLayout.LayoutParams(0, Ui.dp(this, 58), 1f))
         moreButton = tab("更多 ▾") { ChannelPickerFragment.newInstance(currentKey).show(supportFragmentManager, "channels") }
-        toolbar.addView(moreButton)
-        toolbar.addView(View(this).apply { setBackgroundColor(Ui.divider) }, LinearLayout.LayoutParams(Ui.dp(this, 1), Ui.dp(this, 24)))
+        val fixedButtonsInOrder = mutableListOf<Button>()
         listOf("search" to "搜索", "me" to "我的", "history" to "历史").forEach { (key, label) ->
             val button = tab(label) { when (key) { "search" -> showSearch(); "me" -> showMe(); else -> showHistory() } }
-            fixedButtons[key] = button; toolbar.addView(button)
+            fixedButtons[key] = button
+            fixedButtonsInOrder += button
         }
-        root.addView(toolbar, FrameLayout.LayoutParams(-1, Ui.dp(this, 62)).apply { topMargin = Ui.dp(this@MainActivity, 14) })
+        if (compact) {
+            val fixedRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+            fixedRow.addView(logo, LinearLayout.LayoutParams(Ui.dp(this, 36), Ui.dp(this, 42)))
+            Ui.compactNavigationButton(homeButton)
+            fixedRow.addView(homeButton, LinearLayout.LayoutParams(Ui.dp(this, 104), Ui.dp(this, 48)).apply {
+                marginStart = Ui.dp(this@MainActivity, 4)
+            })
+            fixedButtonsInOrder.forEach { button ->
+                Ui.compactNavigationButton(button)
+                fixedRow.addView(button, LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1f).apply {
+                    marginStart = Ui.dp(this@MainActivity, 2)
+                })
+            }
+            toolbar.addView(fixedRow, LinearLayout.LayoutParams(-1, Ui.dp(this, 48)))
+            val channelsRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+            channelsRow.addView(channelScroll, LinearLayout.LayoutParams(0, Ui.dp(this, 44), 1f))
+            channelsRow.addView(moreButton)
+            toolbar.addView(channelsRow, LinearLayout.LayoutParams(-1, Ui.dp(this, 44)))
+            root.addView(toolbar, FrameLayout.LayoutParams(-1, Ui.dp(this, 100)).apply { topMargin = Ui.dp(this@MainActivity, 14) })
+        } else {
+            toolbar.addView(logo, LinearLayout.LayoutParams(Ui.dp(this, 96), Ui.dp(this, 58)))
+            toolbar.addView(homeButton)
+            toolbar.addView(channelScroll, LinearLayout.LayoutParams(0, Ui.dp(this, 58), 1f))
+            toolbar.addView(moreButton)
+            toolbar.addView(View(this).apply { setBackgroundColor(Ui.divider) }, LinearLayout.LayoutParams(Ui.dp(this, 1), Ui.dp(this, 24)))
+            fixedButtonsInOrder.forEach { toolbar.addView(it) }
+            root.addView(toolbar, FrameLayout.LayoutParams(-1, Ui.dp(this, 62)).apply { topMargin = Ui.dp(this@MainActivity, 14) })
+        }
         buildTabs()
         return root
     }
@@ -187,7 +220,8 @@ class MainActivity : AppCompatActivity() {
             navButtons[key] = button
             channelTabs.addView(button)
         }
-        navButtons["home"] = homeButton
+        navButtons["home"] = recommendButton
+        channelTabs.addView(recommendButton)
         ChannelCatalog.normalize(settings.channelOrder, ChannelCatalog.keys).filterNot { it in settings.hiddenTopChannels }
             .forEach { key -> ChannelCatalog.find(key)?.let { add(key, it.title) } }
         updateTabs()

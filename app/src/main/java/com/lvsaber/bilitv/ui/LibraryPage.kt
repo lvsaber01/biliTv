@@ -214,7 +214,17 @@ class LibraryPage(private val host: Activity, private val api: BiliApiClient, pr
                     val count = if (favorites || watchLater) videos.size else entries.size + pgcEntries.size
                     val batch = data as? HistoryBatch
                     val pgcWarning = batch?.pgcError?.let { " · 番剧云历史暂不可用，本机番剧进度仍可续播" }.orEmpty()
-                    status.text = if (count == 0) "暂无视频或番剧历史$pgcWarning" else "已加载 $count 条历史${if (hasMore) "" else " · 已到末尾"}${if (!favorites || watchLater) " · 确定续播，长按查看详情" else ""}$pgcWarning"
+                    val emptyMessage = when {
+                        favorites -> "这个收藏夹暂无视频或番剧"
+                        watchLater -> "稍后再看列表暂无内容"
+                        else -> "暂无视频或番剧历史"
+                    }
+                    val countUnit = when {
+                        favorites -> "个收藏视频"
+                        watchLater -> "个稍后再看视频"
+                        else -> "条历史"
+                    }
+                    status.text = if (count == 0) "$emptyMessage$pgcWarning" else "已加载 $count $countUnit${if (hasMore) "" else " · 已到末尾"}${if (!favorites) " · 确定续播，长按查看详情" else ""}$pgcWarning"
                     more.visibility = if (hasMore) VISIBLE else GONE
                 }.onFailure { fail(it) }
             }

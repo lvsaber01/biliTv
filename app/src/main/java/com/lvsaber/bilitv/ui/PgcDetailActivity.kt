@@ -42,9 +42,12 @@ class PgcDetailActivity : AppCompatActivity() {
     private lateinit var episodesAdapter: EpisodeTiles
     private lateinit var rangeStrip: LinearLayout
     private lateinit var mainPlay: Button
+    private lateinit var restartPlay: Button
     private lateinit var followButton: Button
     private var detail: PgcSeasonDetail? = null
     private var selectedSeasonId = 0L
+    private var entrySeasonId = 0L
+    private var entryFollowStatus = -1
     private var requestedEpisodeId = 0L
     private var selectedEpisodeId = 0L
     private var shownRange = 0
@@ -68,9 +71,12 @@ class PgcDetailActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        Ui.keepLandscapeOnTelevision(this)
         api = BiliApiClient(this)
         selectedSeasonId = savedInstanceState?.getLong(STATE_SEASON) ?: intent.getLongExtra(EXTRA_SEASON_ID, 0)
+        entrySeasonId = savedInstanceState?.getLong(STATE_ENTRY_SEASON) ?: intent.getLongExtra(EXTRA_SEASON_ID, 0)
+        entryFollowStatus = savedInstanceState?.getInt(STATE_ENTRY_FOLLOW_STATUS)
+            ?: intent.getIntExtra(EXTRA_FOLLOW_STATUS, -1)
         requestedEpisodeId = savedInstanceState?.getLong(STATE_EPISODE) ?: intent.getLongExtra(EXTRA_EPISODE_ID, 0)
         selectedEpisodeId = savedInstanceState?.getLong(STATE_SELECTED_EPISODE) ?: requestedEpisodeId
         setContentView(buildPage())
@@ -82,6 +88,8 @@ class PgcDetailActivity : AppCompatActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putLong(STATE_SEASON, selectedSeasonId)
+        outState.putLong(STATE_ENTRY_SEASON, entrySeasonId)
+        outState.putInt(STATE_ENTRY_FOLLOW_STATUS, entryFollowStatus)
         outState.putLong(STATE_EPISODE, requestedEpisodeId)
         outState.putLong(STATE_SELECTED_EPISODE, selectedEpisodeId)
         super.onSaveInstanceState(outState)
@@ -108,8 +116,10 @@ class PgcDetailActivity : AppCompatActivity() {
         root.addView(seasonStrip, LinearLayout.LayoutParams(-1, Ui.dp(this, 44)))
         rangeStrip = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         root.addView(rangeStrip, LinearLayout.LayoutParams(-1, Ui.dp(this, 42)))
+        val widthDp = (resources.displayMetrics.widthPixels / resources.displayMetrics.density).toInt()
+        val episodeColumns = if (Ui.isTelevision(this)) 8 else (widthDp / 96).coerceIn(3, 6)
         episodesList = RecyclerView(this).apply {
-            layoutManager = GridLayoutManager(this@PgcDetailActivity, 8)
+            layoutManager = GridLayoutManager(this@PgcDetailActivity, episodeColumns)
             itemAnimator = null
             clipToPadding = false
             setPadding(0, Ui.dp(context, 4), 0, Ui.dp(context, 8))
@@ -133,7 +143,11 @@ class PgcDetailActivity : AppCompatActivity() {
             setPadding(Ui.dp(context, 12), Ui.dp(context, 10), Ui.dp(context, 12), Ui.dp(context, 10))
         }
         coverView = Ui.poster(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
-        hero.addView(coverView, LinearLayout.LayoutParams(Ui.dp(this, 142), -1).apply { marginEnd = Ui.dp(this@PgcDetailActivity, 14) })
+        val compact = Ui.isCompactWidth(this)
+        hero.addView(coverView, LinearLayout.LayoutParams(Ui.dp(this, if (compact) 104 else 142), if (compact) Ui.dp(this, 150) else -1).apply {
+            marginEnd = Ui.dp(this@PgcDetailActivity, 14)
+            gravity = Gravity.CENTER_VERTICAL
+        })
         val info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_VERTICAL }
         titleView = Ui.text(this, "", 22f, Ui.text).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(0, 0, 0, Ui.dp(context, 2)) }
         subtitleView = Ui.text(this, "", 13f, Ui.muted).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(0, 0, 0, Ui.dp(context, 4)) }
@@ -144,11 +158,21 @@ class PgcDetailActivity : AppCompatActivity() {
             expandButton.text = if (expandedDescription) "收起简介" else "展开简介"
         }
         val actionRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        mainPlay = Ui.button(this, "继续观看") { detail?.let { launchSelected(it, restart = false) } }.apply { minWidth = 0 }
-        val restart = Ui.chip(this, "从头播放", false) { detail?.let { launchSelected(it, restart = true) } }.apply { minWidth = 0 }
+        mainPlay = Ui.button(this, "继续观看") { detail?.let { launchSelected(it, restart = false) } }.apply {
+            minWidth = 0
+            isEnabled = false
+            if (compact) { setTextSize(12f); setPadding(Ui.dp(context, 4), 0, Ui.dp(context, 4), 0); maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }
+        }
+        restartPlay = Ui.chip(this, "从头播放", false) { detail?.let { launchSelected(it, restart = true) } }.apply {
+            minWidth = 0
+            isEnabled = false
+            if (compact) { setTextSize(12f); setPadding(Ui.dp(context, 4), 0, Ui.dp(context, 4), 0) }
+        }
         followButton = Ui.chip(this, "追番", false) { toggleFollow() }
-        actionRow.addView(mainPlay, LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1f).apply { marginEnd = Ui.dp(this@PgcDetailActivity, 6) })
-        actionRow.addView(restart, LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1f).apply { marginStart = Ui.dp(this@PgcDetailActivity, 6); marginEnd = Ui.dp(this@PgcDetailActivity, 6) })
+        followButton.isEnabled = false
+        if (compact) { followButton.setTextSize(12f); followButton.setPadding(Ui.dp(this, 4), 0, Ui.dp(this, 4), 0) }
+        actionRow.addView(mainPlay, LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1f).apply { marginEnd = Ui.dp(this@PgcDetailActivity, 4) })
+        actionRow.addView(restartPlay, LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1f).apply { marginStart = Ui.dp(this@PgcDetailActivity, 4); marginEnd = Ui.dp(this@PgcDetailActivity, 4) })
         actionRow.addView(followButton, LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1f).apply { marginStart = Ui.dp(this@PgcDetailActivity, 6) })
         info.addView(titleView)
         info.addView(subtitleView)
@@ -163,16 +187,22 @@ class PgcDetailActivity : AppCompatActivity() {
         val token = ++generation
         status.text = "正在加载季与正片集数…"
         status.setOnClickListener(null)
+        setDetailActionsEnabled(false)
         AppExecutors.io.execute {
             val result = runCatching { api.getPgcSeasonDetail(seasonId) }
             runOnUiThread {
                 if (token != generation || isFinishing || isDestroyed) return@runOnUiThread
                 result.onSuccess { loaded ->
-                    selectedSeasonId = loaded.season.seasonId
-                    detail = loaded
-                    render(loaded, focusSeason)
+                    val effective = if (loaded.season.seasonId == entrySeasonId && entryFollowStatus > 0 && loaded.season.followStatus <= 0) {
+                        loaded.copy(season = loaded.season.copy(followStatus = entryFollowStatus))
+                    } else loaded
+                    selectedSeasonId = effective.season.seasonId
+                    detail = effective
+                    setDetailActionsEnabled(true)
+                    render(effective, focusSeason)
                 }.onFailure {
-                    status.text = "${friendlyMessage(it)} · 点击重试"
+                    setDetailActionsEnabled(detail != null)
+                    status.text = "番剧详情加载失败：${friendlyMessage(it)} · 点击重试"
                     status.setOnClickListener { loadSeason(seasonId, focusSeason) }
                 }
             }
@@ -189,6 +219,7 @@ class PgcDetailActivity : AppCompatActivity() {
         descriptionView.text = season.description.ifBlank { "暂无简介" }
         expandedDescription = false; descriptionView.maxLines = 2; expandButton.text = "展开简介"
         followButton.text = if (season.followStatus > 0) "已追番" else "追番"
+        Ui.setChipSelected(followButton, season.followStatus > 0)
         followButton.contentDescription = if (season.followStatus > 0) "已追番，点击取消追番" else "追番"
         renderSeasons(value.seasons)
         renderEpisodes(value.episodes)
@@ -236,13 +267,17 @@ class PgcDetailActivity : AppCompatActivity() {
         rangeStrip.removeAllViews()
         if (episodes.size > 24) {
             rangeStrip.addView(Ui.text(this, "集数", 14f, Ui.muted).apply { setPadding(0, 0, Ui.dp(context, 6), 0) })
+            val rangeButtons = mutableListOf<Button>()
             ranges.forEachIndexed { rangeIndex, start ->
                 val end = minOf(start + 24, episodes.size)
-                rangeStrip.addView(Ui.chip(this, "${start + 1}–$end", shownRange == rangeIndex) {
+                val button = Ui.chip(this, "${start + 1}–$end", shownRange == rangeIndex) {
                     shownRange = rangeIndex
+                    rangeButtons.forEachIndexed { index, chip -> Ui.setChipSelected(chip, index == shownRange) }
                     episodesAdapter.submit(episodes.subList(start, end), selectedEpisodeId, repository.recentPgc())
                     episodesList.scrollToPosition(0)
-                })
+                }.apply { tag = "pgc-episode-range-$rangeIndex" }
+                rangeButtons += button
+                rangeStrip.addView(button)
             }
         }
         val start = ranges.getOrNull(shownRange) ?: 0
@@ -254,7 +289,16 @@ class PgcDetailActivity : AppCompatActivity() {
 
     private fun updateSelectedEpisodeLabel(episode: PgcEpisode) {
         val p = repository.findPgc(episode.episodeId)
-        mainPlay.text = if (p?.canResume == true) "继续观看 · ${episode.index.ifBlank { episode.title }}" else "播放 · ${episode.index.ifBlank { episode.title }}"
+        val episodeLabel = episode.index.ifBlank { episode.title }
+        mainPlay.text = if (Ui.isCompactWidth(this)) {
+            if (p?.canResume == true) "继续 · $episodeLabel" else "播放 · $episodeLabel"
+        } else if (p?.canResume == true) "继续观看 · $episodeLabel" else "播放 · $episodeLabel"
+    }
+
+    private fun setDetailActionsEnabled(enabled: Boolean) {
+        mainPlay.isEnabled = enabled
+        restartPlay.isEnabled = enabled
+        followButton.isEnabled = enabled
     }
 
     private fun playEpisode(episode: PgcEpisode, restart: Boolean) {
@@ -324,8 +368,13 @@ class PgcDetailActivity : AppCompatActivity() {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 followButton.isEnabled = true
                 result.onSuccess {
+                    if (seasonId == entrySeasonId) {
+                        entryFollowStatus = if (follow) 1 else 0
+                        intent.putExtra(EXTRA_FOLLOW_STATUS, entryFollowStatus)
+                    }
                     detail = detail?.let { it.copy(season = it.season.copy(followStatus = if (follow) 1 else 0)) }
                     followButton.text = if (follow) "已追番" else "追番"
+                    Ui.setChipSelected(followButton, follow)
                     Toast.makeText(this, if (follow) "追番成功" else "已取消追番", Toast.LENGTH_SHORT).show()
                 }.onFailure { Toast.makeText(this, friendlyMessage(it), Toast.LENGTH_LONG).show() }
             }
@@ -418,7 +467,10 @@ class PgcDetailActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_SEASON_ID = "pgc_season_id"
         const val EXTRA_EPISODE_ID = "pgc_episode_id"
+        const val EXTRA_FOLLOW_STATUS = "pgc_follow_status"
         private const val STATE_SEASON = "state_pgc_season"
+        private const val STATE_ENTRY_SEASON = "state_entry_pgc_season"
+        private const val STATE_ENTRY_FOLLOW_STATUS = "state_entry_pgc_follow_status"
         private const val STATE_EPISODE = "state_pgc_episode"
         private const val STATE_SELECTED_EPISODE = "state_pgc_selected_episode"
     }

@@ -68,6 +68,7 @@ class PlayerActivity : AppCompatActivity() {
     private var routeButton: android.widget.Button? = null
     private var codecFallbackButton: android.widget.Button? = null
     private lateinit var actionRail: LinearLayout
+    private var chapterButton: android.widget.Button? = null
     private var pgcEpisodeButton: android.widget.Button? = null
     private var pgcPicker: PgcEpisodePickerView? = null
     private lateinit var controls: PlaybackControls
@@ -202,7 +203,9 @@ class PlayerActivity : AppCompatActivity() {
         actionRail.addView(actionButton("音轨") { showAudioChooser() })
         actionRail.addView(actionButton("倍速") { showSpeedChooser() })
         actionRail.addView(actionButton("字幕") { showSubtitleChooser() })
-        actionRail.addView(actionButton("章节") { showChapterChooser() })
+        val chapterAction = actionButton("章节") { showChapterChooser() }.apply { visibility = View.GONE }
+        chapterButton = chapterAction
+        actionRail.addView(chapterAction)
         actionRail.addView(actionButton("画面") { showResizeChooser() })
         actionRail.addView(actionButton("线路") { showLineInfo() })
         danmakuButton = actionButton("弹幕 · 加载中") {
@@ -312,14 +315,20 @@ class PlayerActivity : AppCompatActivity() {
             val result = runCatching { api.getPlayerInfo(bvid, cid) }
             runOnUiThread {
                 if (isDestroyed) return@runOnUiThread
-                result.onSuccess { playerInfo = it }
+                result.onSuccess(::setPlayerInfo)
             }
         }
+    }
+
+    private fun setPlayerInfo(info: PlayerInfo) {
+        playerInfo = info
+        chapterButton?.visibility = if (info.chapters.isEmpty()) View.GONE else View.VISIBLE
     }
 
     private fun loadPlayerInfoForCurrent() {
         val pgc = currentPgc
         playerInfo = PlayerInfo()
+        chapterButton?.visibility = View.GONE
         subtitleOverlay.overlayEnabled = false
         subtitleOverlay.submit(emptyList(), AppSettings.load(this).subtitleTextScale)
         subtitleRequestGeneration++
@@ -328,7 +337,7 @@ class PlayerActivity : AppCompatActivity() {
         else AppExecutors.io.execute {
             val result = runCatching { api.getPgcPlayerInfo(pgc) }
             runOnUiThread {
-                if (!isDestroyed && currentPgc?.episodeId == pgc.episodeId) result.onSuccess { playerInfo = it }
+                if (!isDestroyed && currentPgc?.episodeId == pgc.episodeId) result.onSuccess(::setPlayerInfo)
             }
         }
     }

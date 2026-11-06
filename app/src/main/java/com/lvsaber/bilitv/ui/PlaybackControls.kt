@@ -214,7 +214,13 @@ class PlaybackControls(
         } else if (horizontal) {
             if (inActions) {
                 val index = (0 until actions.childCount).indexOfFirst { actions.getChildAt(it) === focused }
-                actions.getChildAt(index + if (code == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1)?.takeIf { it.isEnabled }?.requestFocus()
+                val direction = if (code == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1
+                var nextIndex = index + direction
+                while (nextIndex in 0 until actions.childCount) {
+                    val candidate = actions.getChildAt(nextIndex)
+                    if (candidate.visibility == View.VISIBLE && candidate.isEnabled && candidate.isFocusable && candidate.requestFocus()) break
+                    nextIndex += direction
+                }
                 resetHideTimer()
             } else {
                 val now = SystemClock.uptimeMillis()

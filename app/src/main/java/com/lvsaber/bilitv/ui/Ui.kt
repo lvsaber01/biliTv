@@ -1,8 +1,11 @@
 package com.lvsaber.bilitv.ui
 
+import android.app.Activity
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
@@ -40,16 +43,30 @@ object Ui {
 
     fun chip(context: Context, label: String, selected: Boolean, onClick: () -> Unit): Button = Button(context).apply {
         text = label
-        setTextColor(if (selected) Color.WHITE else muted)
         setTextSize(13f)
         isAllCaps = false
         minHeight = dp(context, 34)
         minWidth = 0
         setPadding(dp(context, 12), 0, dp(context, 12), 0)
-        background = roundedBackground(if (selected) blue else surfaceRaised, dp(context, 17))
+        setChipSelected(this, selected)
         setOnClickListener { onClick() }
         isFocusable = true
         focusHighlight(this)
+    }
+
+    fun setChipSelected(button: android.widget.Button, selected: Boolean) {
+        button.setTextColor(if (selected) Color.WHITE else muted)
+        button.background = roundedBackground(if (selected) blue else surfaceRaised, dp(button.context, 17))
+        button.isSelected = selected
+    }
+
+    fun compactNavigationButton(button: Button) {
+        button.setSingleLine(true)
+        button.maxLines = 1
+        button.ellipsize = TextUtils.TruncateAt.END
+        button.setTextSize(12f)
+        button.minWidth = 0
+        button.setPadding(dp(button.context, 4), 0, dp(button.context, 4), 0)
     }
 
     fun text(context: Context, value: String = "", size: Float = 15f, color: Int = text): TextView = TextView(context).apply {
@@ -107,9 +124,24 @@ object Ui {
         view.elevation = if (focused) dp(view.context, 8).toFloat() else 0f
     }
 
-    /** TV layout density is independent of the user's home-grid preference. */
-    fun videoColumns(context: Context, width: Int = context.resources.displayMetrics.widthPixels): Int =
-        (width / dp(context, 180)).coerceIn(4, 6)
+    fun isTelevision(context: Context): Boolean =
+        context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+
+    fun isCompactWidth(context: Context): Boolean =
+        !isTelevision(context) && context.resources.configuration.smallestScreenWidthDp < 600
+
+    fun keepLandscapeOnTelevision(activity: Activity) {
+        activity.requestedOrientation = if (isTelevision(activity))
+            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        else android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+    }
+
+    /** Keep card density comfortable on narrow phone screens while preserving TV sizing. */
+    fun videoColumns(context: Context, width: Int = context.resources.displayMetrics.widthPixels): Int {
+        val widthDp = (width / context.resources.displayMetrics.density).toInt().coerceAtLeast(1)
+        return if (isTelevision(context) || widthDp >= 600) (widthDp / 180).coerceIn(4, 6)
+        else (widthDp / 168).coerceIn(2, 3)
+    }
 
     fun railCardWidth(context: Context, width: Int): Int =
         (width - dp(context, 16)) / videoColumns(context, width) - dp(context, 8)

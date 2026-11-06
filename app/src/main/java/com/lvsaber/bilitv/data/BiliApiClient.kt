@@ -12,6 +12,9 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 
+internal fun pgcIndexYearRange(year: Int?): String? =
+    year?.takeIf { it in 1900..2100 }?.let { "[$it,${it + 1})" }
+
 /**
  * Thin API gateway. UI code only talks to typed methods, while endpoint
  * variants, WBI signing, cookies, headers and error classification stay here.
@@ -23,6 +26,7 @@ class BiliApiClient(context: Context) {
     private var rankingFingerprintFetched = false
     private val rankingFingerprintLock = Any()
     private val rankingCache = ConcurrentHashMap<Int, List<VideoSummary>>()
+    private val pgcScopeCache = ConcurrentHashMap<Long, PgcSeason>()
 
     fun getPopularVideos(page: Int = 1, pageSize: Int = 20): List<VideoSummary> {
         val root = get("/x/web-interface/popular", mapOf("ps" to pageSize.toString(), "pn" to page.toString()))
@@ -609,6 +613,257 @@ class BiliApiClient(context: Context) {
     fun getPlayerInfo(bvid: String, cid: Long): PlayerInfo {
         val root = getSubtitleInfo(bvid, cid)
         return parsePlayerInfo(root)
+    }
+
+    fun getPgcPlayerInfo(playable: PgcPlayableRef): PlayerInfo {
+        val params = linkedMapOf("cid" to playable.cid.toString(), "ep_id" to playable.episodeId.toString(),
+            "season_id" to playable.seasonId.toString())
+        if (playable.aid > 0) params["aid"] = playable.aid.toString()
+        if (playable.bvid.isNotBlank()) params["bvid"] = playable.bvid
+        val root = runCatching { getSigned("/x/player/wbi/v2", params) }
+            .getOrElse { get("/x/player/v2", params) }
+        return parsePlayerInfo(root)
+    }
+
+    fun getPgcTimeline(category: PgcCategory, before: Int = 0, after: Int = 7): List<PgcTimelineDay> {
+        val root = get("/pgc/web/timeline", mapOf(
+            "types" to category.seasonType.toString(), "before" to before.coerceIn(0, 7).toString(),
+            "after" to after.coerceIn(0, 7).toString(),
+        ))
+        val days = PgcJsonParser.parseTimeline(root, category, allowUnknownScope = true)
+        val unresolvedIds = days.asSequence().flatMap { it.items.asSequence() }
+            .filterNot { it.season.scopeVerified }
+            .map { it.season.seasonId }
+            .distinct()
+            .toList()
+        if (unresolvedIds.isEmpty()) return days
+        var verificationError: Exception? = null
+        val verified = buildMap {
+            unresolvedIds.forEach { seasonId ->
+                val season = pgcScopeCache[seasonId] ?: try {
+                    loadPgcSeasonScope(seasonId)
+                } catch (error: Exception) {
+                    if (error !is BiliApiException || error.apiCode != -422) verificationError = verificationError ?: error
+                    null
+                }
+                if (season != null && season.category == category && season.scopeVerified) put(seasonId, season)
+            }
+        }
+        val filtered = PgcJsonParser.filterTimelineByVerifiedScopes(days, verified)
+        if (filtered.isEmpty()) verificationError?.let { throw it }
+        return filtered
+    }
+
+    fun getPgcRanking(category: PgcCategory, day: Int = 3, limit: Int = 24): List<PgcSeason> {
+        val path = if (category == PgcCategory.JAPANESE_ANIME) "/pgc/web/rank/list" else "/pgc/season/rank/web/list"
+        val root = get(path, mapOf("season_type" to category.seasonType.toString(), "day" to day.coerceIn(3, 7).toString()),
+            referer = if (category == PgcCategory.JAPANESE_ANIME) "https://www.bilibili.com/v/popular/rank/anime" else "https://www.bilibili.com/v/popular/rank/guochuang")
+        val data = root.optJSONObject("data") ?: root.optJSONObject("result") ?: JSONObject()
+        val list = data.optJSONArray("list") ?: JSONArray()
+        val maxItems = limit.coerceIn(1, 99)
+        if (category == PgcCategory.GUOCHUANG) {
+            return (0 until list.length()).mapNotNull { index ->
+                PgcJsonParser.parseSeasonCard(list.optJSONObject(index) ?: return@mapNotNull null, category.seasonType)
+            }.filter { it.category == category }.take(maxItems)
+        }
+        // The ranking feed includes non-Japanese anime and omits `areas`.
+        // Verify ranked candidates from season detail, stopping once the
+        // requested number of Japanese entries has been collected.
+        val result = mutableListOf<PgcSeason>()
+        var verificationError: Exception? = null
+        for (index in 0 until list.length()) {
+            val raw = list.optJSONObject(index) ?: continue
+            val card = PgcJsonParser.parseSeasonCard(raw, category.seasonType, allowUnknownScope = true) ?: continue
+            val verified = if (card.scopeVerified) card else {
+                val metadata = pgcScopeCache[card.seasonId] ?: try {
+                    loadPgcSeasonScope(card.seasonId)
+                } catch (error: Exception) {
+                    if (error !is BiliApiException || error.apiCode != -422) verificationError = verificationError ?: error
+                    null
+                }
+                metadata?.let { PgcJsonParser.applyVerifiedScope(card, it) }
+            }
+            if (verified != null && verified.category == category) result += verified
+            if (result.size >= maxItems) break
+        }
+        if (result.isEmpty()) verificationError?.let { throw it }
+        return result
+    }
+
+    fun getPgcIndex(category: PgcCategory, page: Int = 1, year: Int? = null, finished: Boolean? = null, order: Int = 4): PgcIndexPage {
+        val params = linkedMapOf(
+            "type" to "1", "season_type" to category.seasonType.toString(), "st" to category.seasonType.toString(),
+            "page" to page.coerceAtLeast(1).toString(), "pagesize" to "24", "order" to order.coerceIn(0, 6).toString(),
+            "sort" to "0", "season_version" to "-1", "spoken_language_type" to "-1",
+            // Area 2 is Japan. The API's index cards usually omit area names,
+            // so rely on the server-side filter rather than discarding all rows.
+            "area" to if (category == PgcCategory.JAPANESE_ANIME) "2" else "-1",
+            "is_finish" to (finished?.let { if (it) "1" else "0" } ?: "-1"), "season_status" to "-1",
+            "season_month" to "-1", "copyright" to "-1", "style_id" to "-1",
+        )
+        pgcIndexYearRange(year)?.let { params["year"] = it }
+        val root = get("/pgc/season/index/result", params)
+        val data = root.optJSONObject("data") ?: JSONObject()
+        val list = data.optJSONArray("list") ?: JSONArray()
+        val items = (0 until list.length()).mapNotNull { index ->
+            PgcJsonParser.parseSeasonCard(
+                list.optJSONObject(index) ?: return@mapNotNull null,
+                category.seasonType,
+                allowUnknownScope = category == PgcCategory.JAPANESE_ANIME,
+                verifiedScopeByServerFilter = category == PgcCategory.JAPANESE_ANIME,
+            )
+        }.filter { it.category == category }
+        return PgcIndexPage(items, data.optInt("has_next") == 1)
+    }
+
+    fun searchPgc(keyword: String, category: PgcCategory, page: Int = 1): PgcSearchPage {
+        val params = linkedMapOf("search_type" to "media_bangumi", "keyword" to keyword, "page" to page.coerceAtLeast(1).toString(), "page_size" to "20")
+        val root = runCatching { getSigned("/x/web-interface/wbi/search/type", params) }
+            .getOrElse { get("/x/web-interface/search/type", params) }
+        val data = root.optJSONObject("data") ?: JSONObject()
+        val list = data.optJSONArray("result") ?: JSONArray()
+        val result = mutableListOf<PgcSeason>()
+        for (index in 0 until list.length()) {
+            val raw = list.optJSONObject(index) ?: continue
+            val returnedType = raw.optInt("season_type")
+            if (returnedType > 0 && returnedType != category.seasonType) continue
+            val seasonId = raw.optLong("season_id")
+            val direct = PgcJsonParser.parseSeasonCard(raw, category.seasonType)
+            val verified = direct?.takeIf { it.category == category }
+                ?: if (seasonId > 0) runCatching { getPgcSeasonDetail(seasonId).season }.getOrNull()?.takeIf { it.category == category } else null
+            if (verified != null && result.none { it.seasonId == verified.seasonId }) result += verified
+        }
+        val pages = data.optInt("numPages", data.optInt("num_pages", 1))
+        return PgcSearchPage(result, page < pages)
+    }
+
+    fun getPgcSeasonDetail(seasonId: Long): PgcSeasonDetail {
+        require(seasonId > 0) { "seasonId 无效" }
+        val root = get("/pgc/view/web/season", mapOf("season_id" to seasonId.toString()))
+        val detail = PgcJsonParser.parseDetail(root, seasonId)
+        pgcScopeCache[seasonId] = detail.season
+        val parts = runCatching {
+            PgcJsonParser.parseSections(get("/pgc/web/season/section", mapOf("season_id" to seasonId.toString())), seasonId, detail.episodes)
+        }.getOrNull()
+        return if (parts == null) detail else detail.copy(episodes = parts.episodes, extraSections = parts.extraSections)
+    }
+
+    fun getPgcFollowing(category: PgcCategory, page: Int = 1): PgcIndexPage {
+        if (!hasSession()) throw BiliApiException(-101, "登录后查看我的追番")
+        val mid = getNavigation().optLong("mid")
+        if (mid <= 0) throw BiliApiException(-101, "无法读取当前账号，请重新登录")
+        val root = get("/x/space/bangumi/follow/list", mapOf("vmid" to mid.toString(), "type" to "1", "follow_status" to "0", "ps" to "24", "pn" to page.coerceAtLeast(1).toString()),
+            referer = "https://space.bilibili.com/$mid/bangumi")
+        val data = root.optJSONObject("data") ?: JSONObject()
+        val list = data.optJSONArray("list") ?: JSONArray()
+        val items = mutableListOf<PgcSeason>()
+        for (index in 0 until list.length()) {
+            val raw = list.optJSONObject(index) ?: continue
+            val returnedType = raw.optInt("season_type")
+            if (returnedType > 0 && returnedType != category.seasonType) continue
+            val seasonId = raw.optLong("season_id")
+            val direct = PgcJsonParser.parseSeasonCard(raw, category.seasonType)
+            val verified = direct?.takeIf { it.category == category }
+                ?: if (seasonId > 0) runCatching { getPgcSeasonDetail(seasonId).season }.getOrNull()?.takeIf { it.category == category } else null
+            if (verified != null && items.none { it.seasonId == verified.seasonId }) items += verified.copy(followStatus = verified.followStatus.takeIf { it > 0 } ?: 1)
+        }
+        val total = data.optInt("total")
+        return PgcIndexPage(items, page * 24 < total)
+    }
+
+    fun modifyPgcFollow(seasonId: Long, follow: Boolean) {
+        if (!hasSession()) throw BiliApiException(-101, "请先登录后追番")
+        postForm(if (follow) "/pgc/web/follow/add" else "/pgc/web/follow/del",
+            mapOf("season_id" to seasonId.toString(), "csrf" to csrf()))
+    }
+
+    fun getPgcPlaySource(playable: PgcPlayableRef, settings: AppSettings = AppSettings(),
+        device: PlaybackDeviceCapabilities = PlaybackDeviceCapabilities.unrestricted()): PlaySource {
+        val dashRequested = settings.videoFormat == AppSettings.VideoFormat.DASH || settings.defaultQuality == 0 ||
+            settings.defaultQuality in DASH_QUALITY_IDS || settings.videoCodec != AppSettings.VideoCodec.AUTO
+        val params = linkedMapOf(
+            "ep_id" to playable.episodeId.toString(), "season_id" to playable.seasonId.toString(), "cid" to playable.cid.toString(),
+            "qn" to (settings.defaultQuality.takeIf { it > 0 } ?: 80).toString(), "fnver" to "0",
+            "fnval" to if (dashRequested) DASH_CAPABILITY_FLAGS.toString() else "1", "fourk" to "1",
+            "support_multi_audio" to "true", "platform" to "web", "from_client" to "BROWSER",
+        )
+        if (playable.aid > 0) params["avid"] = playable.aid.toString()
+        if (playable.bvid.isNotBlank()) params["bvid"] = playable.bvid
+        val root = get("/pgc/player/web/v2/playurl", params, referer = "https://www.bilibili.com/bangumi/play/ep${playable.episodeId}")
+        val result = root.optJSONObject("result") ?: root.optJSONObject("data") ?: JSONObject()
+        val info = result.optJSONObject("video_info") ?: result
+        val serverQualities = info.toPlaybackQualities()
+        if (dashRequested) {
+            val dash = info.optJSONObject("dash")
+            val tracks = (dash?.optJSONArray("video") ?: JSONArray()).toVideoTracks().map { track ->
+                val support = device.supports(track)
+                track.copy(deviceSupported = support.supported, deviceReason = support.reason)
+            }
+            val audios = buildList {
+                addAll((dash?.optJSONArray("audio") ?: JSONArray()).toAudioTracks())
+                val dolby = dash?.optJSONObject("dolby")?.optJSONArray("audio")
+                if (dolby != null) addAll(dolby.toAudioTracks())
+                val flac = dash?.optJSONObject("flac")?.optJSONObject("audio")
+                if (flac != null) addAll(JSONArray().put(flac).toAudioTracks())
+            }.distinctBy { it.id to it.url }
+            val qualityTracks = PlaybackTrackSelector.selectableTracks(tracks, settings.videoCodec)
+            val qualities = mergeQualities(serverQualities, qualityTracks, device,
+                requireConcreteTrack = settings.videoCodec != AppSettings.VideoCodec.AUTO)
+            val selectedVideo = PlaybackTrackSelector.select(tracks, settings)
+            val selectedAudio = audios.maxByOrNull { it.bandwidth }
+            if (selectedVideo != null && selectedAudio != null) {
+                return PlaySource("", selectedVideo.height.let { qualityLabel(selectedVideo.id, it, selectedVideo.isHdr, selectedVideo.isDolbyVision) },
+                    "video/mp4", selectedVideo, selectedAudio, true, audios.sortedByDescending { it.bandwidth }, qualities,
+                    PlaybackRouteSet.fromUrls(listOf(selectedVideo.url) + selectedVideo.backupUrls, listOf(selectedAudio.url) + selectedAudio.backupUrls))
+            }
+            if (settings.videoCodec != AppSettings.VideoCodec.AUTO) throw BiliApiException(-415, "当前番剧没有可用的${settings.videoCodec.label}轨道，请切换编码或画质")
+            if (tracks.isNotEmpty() && !settings.experimentalQualityEnabled && tracks.none { it.deviceSupported }) {
+                throw BiliApiException(-415, "设备未检测到可播放的番剧画质，可在设置开启实验性高规格播放")
+            }
+        }
+        val first = info.optJSONArray("durl")?.optJSONObject(0)
+        val url = first?.optString("url").orEmpty()
+        if (url.isBlank()) throw BiliApiException(-404, "当前番剧没有可用的播放地址")
+        val route = PlaybackRouteSet.fromUrls(listOf(url) + (first?.optStringArray("backup_url", "backupUrl").orEmpty()))
+        val quality = info.optInt("quality", settings.defaultQuality.takeIf { it > 0 } ?: 80)
+        return PlaySource(url, qualityLabel(quality, 0, quality in HDR_QUALITY_IDS, quality == 126), "video/mp4",
+            availableQualities = serverQualities.map { it.withDevice(device) }, routeSet = route)
+    }
+
+    fun getPgcHistoryPage(cursor: HistoryCursor? = null, expectedAccount: String? = null): PgcHistoryPage {
+        val cookie = credentialStore.readCookie()
+        if (expectedAccount != null && AccountIdentity.fromCookie(cookie) != expectedAccount) throw BiliApiException(-101, "账号已变化，请重新加载")
+        val params = mutableMapOf("ps" to "24", "type" to "archive", "business" to "pgc")
+        cursor?.let { params["max"] = it.max.toString(); params["view_at"] = it.viewAt.toString(); params["business"] = "pgc" }
+        val root = requestRoot(BASE_URL, "/x/web-interface/history/cursor", params, cookie)
+        if (root.optInt("code") != 0) throw BiliApiException(root.optInt("code"), root.optString("message"))
+        val page = PgcJsonParser.parseHistory(root, cursor)
+        val verified = page.entries.mapNotNull { progress ->
+            val ref = progress.playable
+            if (ref.scopeVerified) progress
+            else {
+                val season = pgcScopeCache[ref.seasonId] ?: runCatching { verifyPgcSeasonScope(ref.seasonId) }.getOrNull()
+                season?.takeIf { it.category == ref.category && it.scopeVerified }
+                    ?.let { progress.copy(playable = ref.copy(areas = it.areas, seasonTitle = ref.seasonTitle.ifBlank { it.title }, coverUrl = ref.coverUrl.ifBlank { it.coverUrl })) }
+            }
+        }
+        val resolvedUnknown = page.unclassified.mapNotNull { candidate ->
+            val season = pgcScopeCache[candidate.seasonId] ?: runCatching { verifyPgcSeasonScope(candidate.seasonId) }.getOrNull()
+            season?.takeIf { it.scopeVerified }?.let(candidate::verified)
+        }
+        return page.copy(entries = verified + resolvedUnknown, unclassified = emptyList())
+    }
+
+    private fun verifyPgcSeasonScope(seasonId: Long): PgcSeason {
+        pgcScopeCache[seasonId]?.let { return it }
+        return loadPgcSeasonScope(seasonId)
+    }
+
+    private fun loadPgcSeasonScope(seasonId: Long): PgcSeason {
+        val root = get("/pgc/view/web/season", mapOf("season_id" to seasonId.toString()))
+        val season = PgcJsonParser.parseDetail(root, seasonId).season
+        pgcScopeCache[seasonId] = season
+        return season
     }
 
     internal fun parsePlayerInfo(root: JSONObject): PlayerInfo {

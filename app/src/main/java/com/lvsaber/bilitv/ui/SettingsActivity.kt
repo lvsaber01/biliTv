@@ -4,6 +4,7 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -97,8 +98,13 @@ class SettingsActivity : AppCompatActivity() {
         header.addView(Ui.chip(this, "‹ 返回", false) { finish() })
         header.addView(Ui.text(this, "设置", 28f), LinearLayout.LayoutParams(0, Ui.dp(this, 56), 1f))
         root.addView(header)
-        val columns = LinearLayout(this)
-        val nav = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val compact = Ui.isCompactWidth(this)
+        val columns = LinearLayout(this).apply {
+            orientation = if (compact) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+        }
+        val nav = LinearLayout(this).apply {
+            orientation = if (compact) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+        }
         categories.forEach { (key, label) ->
             val button = Ui.chip(this, label, false) { selectSheet(key) }.apply {
                 id = View.generateViewId(); Ui.focusHighlight(this)
@@ -119,13 +125,30 @@ class SettingsActivity : AppCompatActivity() {
                 }
             }
             categoryButtons[key] = button
-            nav.addView(button, LinearLayout.LayoutParams(-1, Ui.dp(this, 50)).apply { bottomMargin = Ui.dp(this@SettingsActivity, 8) })
+            nav.addView(button, LinearLayout.LayoutParams(
+                if (compact) -2 else -1,
+                Ui.dp(this, if (compact) 42 else 50),
+            ).apply {
+                if (compact) marginEnd = Ui.dp(this@SettingsActivity, 6)
+                else bottomMargin = Ui.dp(this@SettingsActivity, 8)
+            })
         }
-        columns.addView(NestedScrollView(this).apply { addView(nav) }, LinearLayout.LayoutParams(Ui.dp(this, 155), -1))
+        if (compact) {
+            columns.addView(HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled = false
+                addView(nav)
+            }, LinearLayout.LayoutParams(-1, Ui.dp(this, 50)))
+        } else {
+            columns.addView(NestedScrollView(this).apply { addView(nav) }, LinearLayout.LayoutParams(Ui.dp(this, 155), -1))
+        }
         sheetHost = android.widget.FrameLayout(this).apply {
             background = Ui.roundedBackground(Ui.surface, Ui.dp(context, 18))
         }
-        columns.addView(sheetHost, LinearLayout.LayoutParams(0, -1, 1f).apply { marginStart = Ui.dp(this@SettingsActivity, 16) })
+        columns.addView(sheetHost, if (compact) {
+            LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = Ui.dp(this@SettingsActivity, 8) }
+        } else {
+            LinearLayout.LayoutParams(0, -1, 1f).apply { marginStart = Ui.dp(this@SettingsActivity, 16) }
+        })
         root.addView(columns, LinearLayout.LayoutParams(-1, 0, 1f))
         val requested = intent.getStringExtra("section")
         selectSheet(when {

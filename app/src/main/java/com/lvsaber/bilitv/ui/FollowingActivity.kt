@@ -29,6 +29,10 @@ class FollowingActivity : AppCompatActivity() {
     private var page = 0
     private var hasMore = true
     private var loading = false
+    private var focusedMid: Long? = null
+    private var focusedPosition = 0
+    private var restoreGridFocusAfterLoad = false
+    private var nextPageFocusPosition: Int? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,7 +69,13 @@ class FollowingActivity : AppCompatActivity() {
         root.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
         back.setOnKeyListener { _, key, event ->
             if (event.action == KeyEvent.ACTION_DOWN && key == KeyEvent.KEYCODE_DPAD_DOWN) {
-                if (adapter.itemCount > 0) grid.findViewHolderForAdapterPosition(0)?.itemView?.requestFocus() else grid.requestFocus()
+                if (adapter.itemCount > 0) {
+                    requestGridItemFocus(0)
+                } else {
+                    focusedPosition = 0
+                    restoreGridFocusAfterLoad = true
+                    grid.requestFocus()
+                }
                 true
             } else false
         }
@@ -73,13 +83,19 @@ class FollowingActivity : AppCompatActivity() {
     }
 
     private fun refresh() {
-        users.clear(); page = 0; hasMore = true; adapter.submitList(emptyList()); loadNext()
+        users.clear(); page = 0; hasMore = true
+        focusedMid = null; focusedPosition = 0; restoreGridFocusAfterLoad = false; nextPageFocusPosition = null
+        adapter.submitList(emptyList()); loadNext()
     }
 
     private fun loadNext() {
         if (loading || !hasMore) return
+        if (nextPageFocusPosition == null && !restoreGridFocusAfterLoad) {
+            restoreGridFocusAfterLoad = captureFocusedUser()
+        }
         loading = true
         val nextPage = page + 1
+        val oldCount = users.size
         status.text = if (users.isEmpty()) "正在加载关注列表…" else "正在加载更多…"
         AppExecutors.io.execute {
             val result = runCatching { api.getFollowingProfiles(nextPage, PAGE_SIZE) }
@@ -91,7 +107,53 @@ class FollowingActivity : AppCompatActivity() {
                     hasMore = loaded.size >= PAGE_SIZE
                     adapter.submitList(users.values.toList())
                     status.text = if (users.isEmpty()) "还没有关注 UP 主" else "已关注 ${users.size} 位 UP 主${if (hasMore) " · 下移继续加载" else ""}"
+                    restoreFocusAfterPage(oldCount)
                 }.onFailure { status.text = friendlyMessage(it) }
+            }
+        }
+    }
+
+    private fun captureFocusedUser(): Boolean {
+        val focused = grid.findFocus() ?: return false
+        val holder = grid.findContainingViewHolder(focused) ?: return false
+        val position = holder.bindingAdapterPosition
+        if (position !in users.values.indices) return false
+        focusedPosition = position
+        focusedMid = users.values.elementAtOrNull(position)?.mid
+        return true
+    }
+
+    private fun restoreFocusAfterPage(oldCount: Int) {
+        val newCount = adapter.itemCount
+        val explicitTarget = nextPageFocusPosition
+        val target = when {
+            explicitTarget != null && newCount > oldCount -> explicitTarget.coerceIn(oldCount, newCount - 1)
+            restoreGridFocusAfterLoad -> focusedMid?.let { mid -> users.keys.indexOf(mid).takeIf { it >= 0 } }
+                ?: focusedPosition.takeIf { it in 0 until newCount }
+            else -> null
+        }
+        nextPageFocusPosition = null
+        restoreGridFocusAfterLoad = false
+        if (target == null || target !in 0 until newCount) return
+        focusedPosition = target
+        focusedMid = users.values.elementAtOrNull(target)?.mid
+        requestGridItemFocus(target)
+    }
+
+    private fun requestGridItemFocus(position: Int, retry: Int = 0) {
+        if (isFinishing || isDestroyed || adapter.itemCount == 0) return
+        val target = position.coerceIn(0, adapter.itemCount - 1)
+        grid.post {
+            if (isFinishing || isDestroyed) return@post
+            if (retry == 0) (grid.layoutManager as? GridLayoutManager)?.scrollToPosition(target)
+            grid.postOnAnimation {
+                if (isFinishing || isDestroyed) return@postOnAnimation
+                val item = grid.findViewHolderForAdapterPosition(target)?.itemView
+                // TV users navigate with D-pad; requestFocusFromTouch also exits touch mode
+                // when this screen was entered after a touch-based navigation path.
+                val focused = item?.isShown == true && item.requestFocusFromTouch()
+                if (focused) return@postOnAnimation
+                if (retry < 5) grid.postDelayed({ requestGridItemFocus(target, retry + 1) }, 60)
             }
         }
     }
@@ -123,15 +185,29 @@ class FollowingActivity : AppCompatActivity() {
             val card = holder.itemView as UserCard
             val user = items[position]
             card.bind(user)
+            card.setOnFocusChangeListener { view, focused ->
+                Ui.applyFocusHighlight(view, focused)
+                if (focused) {
+                    focusedPosition = holder.bindingAdapterPosition
+                    focusedMid = user.mid
+                }
+            }
             card.setOnClickListener {
                 startActivity(Intent(this@FollowingActivity, UpProfileActivity::class.java).putExtra(UpProfileActivity.EXTRA_MID, user.mid))
             }
             card.setOnKeyListener { _, key, event ->
                 if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
                 val manager = grid.layoutManager as GridLayoutManager
+                val currentPosition = holder.bindingAdapterPosition
+                if (currentPosition == RecyclerView.NO_POSITION) return@setOnKeyListener false
                 when (key) {
-                    KeyEvent.KEYCODE_DPAD_UP -> if (position < manager.spanCount) { back.requestFocus(); true } else false
-                    KeyEvent.KEYCODE_DPAD_DOWN -> if (position >= itemCount - manager.spanCount && hasMore) { loadNext(); true } else false
+                    KeyEvent.KEYCODE_DPAD_UP -> if (currentPosition < manager.spanCount) { back.requestFocus(); true } else false
+                    KeyEvent.KEYCODE_DPAD_DOWN -> if (currentPosition >= itemCount - manager.spanCount && hasMore) {
+                        focusedPosition = currentPosition
+                        focusedMid = items.getOrNull(currentPosition)?.mid
+                        nextPageFocusPosition = itemCount + currentPosition % manager.spanCount
+                        loadNext(); true
+                    } else false
                     else -> false
                 }
             }

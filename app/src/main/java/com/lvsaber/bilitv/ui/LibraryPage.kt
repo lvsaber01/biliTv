@@ -31,6 +31,9 @@ class LibraryPage(private val host: Activity, private val api: BiliApiClient, pr
     private val adapter = Tiles()
     private val more = Ui.chip(host, "加载更多", false) { loadNext() }
     private var cursor: HistoryCursor? = null
+    private var pgcCursor: HistoryCursor? = null
+    private var archiveHasMore = true
+    private var pgcHasMore = true
     private var folderId: Long? = null
     private var folderPage = 1
     private var loading = false
@@ -40,6 +43,7 @@ class LibraryPage(private val host: Activity, private val api: BiliApiClient, pr
     val accountKey get() = owner
     private var disposed = false
     private val entries = linkedMapOf<String, WatchProgress>()
+    private val pgcEntries = linkedMapOf<Long, PgcProgress>()
     private val videos = linkedMapOf<String, VideoSummary>()
     private var preferredColumn = 0
     private var verticalFocus = false
@@ -119,8 +123,9 @@ class LibraryPage(private val host: Activity, private val api: BiliApiClient, pr
         folderId = null; refresh(); return true
     }
     fun refreshLocal() {
-        if (!favorites && repository.account == owner && owner != "guest") {
+        if (!favorites && !watchLater && repository.account == owner) {
             repository.recent().take(24).forEach { entry -> entries[entry.video.bvid] = WatchProgress.newer(entries[entry.video.bvid], entry) }
+            repository.recentPgc().take(24).forEach { entry -> pgcEntries[entry.playable.episodeId] = newerPgc(pgcEntries[entry.playable.episodeId], entry) }
             renderHistory()
         }
     }
@@ -128,16 +133,25 @@ class LibraryPage(private val host: Activity, private val api: BiliApiClient, pr
         generation++; loading = false; owner = repository.account
         pendingNext = null; preferredColumn = 0
         focusRequest++
-        cursor = null; folderPage = 1; hasMore = true
-        entries.clear(); videos.clear(); controls.removeAllViews()
+        cursor = null; pgcCursor = null; archiveHasMore = true; pgcHasMore = true; folderPage = 1; hasMore = true
+        entries.clear(); pgcEntries.clear(); videos.clear(); controls.removeAllViews()
         if (owner == "guest") {
-            adapter.submitList(emptyList()); more.visibility = GONE
+            if (!favorites && !watchLater) {
+                repository.recent().take(24).forEach { entries[it.video.bvid] = it }
+                repository.recentPgc().take(24).forEach { pgcEntries[it.playable.episodeId] = it }
+                renderHistory()
+            } else adapter.submitList(emptyList())
+            more.visibility = GONE
             status.text = "登录后查看云端${when { favorites -> "收藏"; watchLater -> "稍后再看"; else -> "观看历史" }}，本机播放进度仍会独立保存。"
             controls.addView(Ui.button(host, "二维码登录") { host.startActivity(Intent(host, LoginActivity::class.java)) })
             return
         }
         if (favorites && folderId == null) loadFolders() else {
-            if (!favorites && !watchLater) { repository.recent().take(24).forEach { entries[it.video.bvid] = it }; renderHistory() }
+            if (!favorites && !watchLater) {
+                repository.recent().take(24).forEach { entries[it.video.bvid] = it }
+                repository.recentPgc().take(24).forEach { pgcEntries[it.playable.episodeId] = it }
+                renderHistory()
+            }
             loadNext()
         }
     }
@@ -163,29 +177,54 @@ class LibraryPage(private val host: Activity, private val api: BiliApiClient, pr
         loading = true; status.text = "正在加载…"; more.isEnabled = false
         val token = generation
         AppExecutors.io.execute {
-            val result = runCatching {
+            val result: Result<Any> = runCatching {
                 when {
                     watchLater -> api.getWatchLater()
                     favorites -> api.getFavoriteVideos(folderId!!, folderPage, 24)
-                    else -> api.getHistoryPage(cursor, owner)
+                    else -> {
+                        val archive = if (archiveHasMore) runCatching { api.getHistoryPage(cursor, owner) } else null
+                        val pgc = if (pgcHasMore) runCatching { api.getPgcHistoryPage(pgcCursor, owner) } else null
+                        HistoryBatch(archive?.getOrNull(), pgc?.getOrNull(), archive?.exceptionOrNull(), pgc?.exceptionOrNull())
+                    }
                 }
             }
             post {
                 if (disposed || token != generation || owner != repository.account) return@post
                 loading = false; more.isEnabled = true
                 result.onSuccess { data ->
-                    if (data is HistoryPage) {
-                        repository.merge(data.entries, owner)
-                        data.entries.forEach { entry -> entries[entry.video.bvid] = WatchProgress.newer(entries[entry.video.bvid], repository.find(entry.video.bvid) ?: entry) }
-                        cursor = data.next; hasMore = data.hasMore; renderHistory()
+                    if (data is HistoryBatch) {
+                        data.archive?.let { page ->
+                            repository.merge(page.entries, owner)
+                            page.entries.forEach { entry -> entries[entry.video.bvid] = WatchProgress.newer(entries[entry.video.bvid], repository.find(entry.video.bvid) ?: entry) }
+                            cursor = page.next; archiveHasMore = page.hasMore
+                        }
+                        data.pgc?.let { page ->
+                            repository.mergePgc(page.entries, owner)
+                            page.entries.forEach { entry -> pgcEntries[entry.playable.episodeId] = newerPgc(pgcEntries[entry.playable.episodeId], repository.findPgc(entry.playable.episodeId) ?: entry) }
+                            pgcCursor = page.next; pgcHasMore = page.hasMore
+                        }
+                        hasMore = archiveHasMore || pgcHasMore
+                        renderHistory()
                     } else {
                         @Suppress("UNCHECKED_CAST") val incoming = data as List<VideoSummary>
                         incoming.forEach { videos[it.bvid] = it }; folderPage++; hasMore = incoming.size >= 24
                         if (watchLater) hasMore = false
                         submitTiles(videos.values.map { Tile(video = it, progress = repository.find(it.bvid)) })
                     }
-                    val count = if (favorites) videos.size else entries.size
-                    status.text = if (count == 0) "暂无视频" else "已加载 $count 个视频${if (hasMore) "" else " · 已到末尾"}${if (!favorites || watchLater) " · 确定续播，长按查看详情" else ""}"
+                    val count = if (favorites || watchLater) videos.size else entries.size + pgcEntries.size
+                    val batch = data as? HistoryBatch
+                    val pgcWarning = batch?.pgcError?.let { " · 番剧云历史暂不可用，本机番剧进度仍可续播" }.orEmpty()
+                    val emptyMessage = when {
+                        favorites -> "这个收藏夹暂无视频或番剧"
+                        watchLater -> "稍后再看列表暂无内容"
+                        else -> "暂无视频或番剧历史"
+                    }
+                    val countUnit = when {
+                        favorites -> "个收藏视频"
+                        watchLater -> "个稍后再看视频"
+                        else -> "条历史"
+                    }
+                    status.text = if (count == 0) "$emptyMessage$pgcWarning" else "已加载 $count $countUnit${if (hasMore) "" else " · 已到末尾"}${if (!favorites) " · 确定续播，长按查看详情" else ""}$pgcWarning"
                     more.visibility = if (hasMore) VISIBLE else GONE
                 }.onFailure { fail(it) }
             }
@@ -206,13 +245,20 @@ class LibraryPage(private val host: Activity, private val api: BiliApiClient, pr
     private fun renderHistory() {
         val tiles = mutableListOf<Tile>()
         var previous = ""
-        entries.values.sortedByDescending { it.updatedAt }.forEach { progress ->
-            val group = dateGroup(progress.updatedAt)
+        val history = buildList {
+            entries.values.forEach { add(it.updatedAt to Tile(video = it.video, progress = it)) }
+            pgcEntries.values.forEach { add(it.updatedAt to Tile(pgcProgress = it)) }
+        }.sortedByDescending { it.first }
+        history.forEach { (time, tile) ->
+            val group = dateGroup(time)
             if (group != previous) { tiles += Tile(header = group); previous = group }
-            tiles += Tile(video = progress.video, progress = progress)
+            tiles += tile
         }
         submitTiles(tiles)
     }
+
+    private fun newerPgc(local: PgcProgress?, incoming: PgcProgress): PgcProgress =
+        if (local != null && local.updatedAt >= incoming.updatedAt) local else incoming
 
     private fun dateGroup(time: Long): String {
         val today = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
@@ -223,9 +269,14 @@ class LibraryPage(private val host: Activity, private val api: BiliApiClient, pr
         }
     }
 
-    private data class Tile(val header: String? = null, val video: VideoSummary? = null, val progress: WatchProgress? = null, val folder: FavoriteFolder? = null) {
-        val key get() = header?.let { "date:$it" } ?: folder?.let { "folder:${it.id}" } ?: video!!.bvid
+    private data class Tile(val header: String? = null, val video: VideoSummary? = null, val progress: WatchProgress? = null,
+        val pgcProgress: PgcProgress? = null, val folder: FavoriteFolder? = null) {
+        val key get() = header?.let { "date:$it" } ?: folder?.let { "folder:${it.id}" }
+            ?: pgcProgress?.let { "pgc:${it.playable.episodeId}" } ?: video!!.bvid
     }
+    private data class HistoryBatch(
+        val archive: HistoryPage?, val pgc: PgcHistoryPage?, val archiveError: Throwable?, val pgcError: Throwable?,
+    )
     private class Holder(view: View) : RecyclerView.ViewHolder(view)
     private inner class Tiles : ListAdapter<Tile, Holder>(object : DiffUtil.ItemCallback<Tile>() {
         override fun areItemsTheSame(oldItem: Tile, newItem: Tile) = oldItem.key == newItem.key
@@ -233,15 +284,38 @@ class LibraryPage(private val host: Activity, private val api: BiliApiClient, pr
     }) {
         init { setHasStableIds(true) }
         override fun getItemId(position: Int) = getItem(position).key.fold(0L) { hash, char -> hash * 31 + char.code }
-        override fun getItemViewType(position: Int) = when { getItem(position).header != null -> 1; getItem(position).folder != null -> 2; else -> 0 }
+        override fun getItemViewType(position: Int) = when {
+            getItem(position).header != null -> 1
+            getItem(position).folder != null -> 2
+            getItem(position).pgcProgress != null -> 3
+            else -> 0
+        }
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
-            val view = if (viewType == 0) VideoCard(host, grid = true) else Ui.text(host, size = if (viewType == 1) 20f else 22f)
-            view.layoutParams = RecyclerView.LayoutParams(-1, if (viewType == 0) -2 else Ui.dp(host, if (viewType == 1) 30 else 80)).apply { setMargins(Ui.dp(host, 4), Ui.dp(host, 3), Ui.dp(host, 4), Ui.dp(host, 5)) }
+            val view = when (viewType) {
+                0 -> VideoCard(host, grid = true)
+                3 -> PgcCardView(host)
+                else -> Ui.text(host, size = if (viewType == 1) 20f else 22f)
+            }
+            view.layoutParams = RecyclerView.LayoutParams(-1, if (viewType == 0 || viewType == 3) -2 else Ui.dp(host, if (viewType == 1) 30 else 80)).apply { setMargins(Ui.dp(host, 4), Ui.dp(host, 3), Ui.dp(host, 4), Ui.dp(host, 5)) }
             return Holder(view)
         }
         override fun onBindViewHolder(holder: Holder, position: Int) {
             val tile = getItem(position)
-            if (tile.video != null) {
+            if (tile.pgcProgress != null) {
+                val progress = tile.pgcProgress
+                val ref = progress.playable
+                val season = PgcSeason(ref.seasonId, title = ref.seasonTitle, coverUrl = ref.coverUrl,
+                    category = ref.category, areas = ref.areas, newestEpisode = ref.episodeTitle)
+                (holder.itemView as PgcCardView).apply {
+                    bind(season, progress)
+                    setClick { PgcPlaybackLauncher.launch(host, ref, if (progress.canResume) progress.positionMs else 0L) }
+                    setOnLongClickListener {
+                        host.startActivity(Intent(host, PgcDetailActivity::class.java)
+                            .putExtra(PgcDetailActivity.EXTRA_SEASON_ID, ref.seasonId)
+                            .putExtra(PgcDetailActivity.EXTRA_EPISODE_ID, ref.episodeId)); true
+                    }
+                }
+            } else if (tile.video != null) {
                 val card = holder.itemView as VideoCard
                 card.bind(tile.video)
                 tile.progress?.let { card.showWatchTime(it.updatedAt) }

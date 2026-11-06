@@ -47,6 +47,7 @@ class PlaybackControls(
     private val progress: SeekBar
     private val time: TextView
     private val hint: TextView
+    private lateinit var titleLabel: TextView
     private lateinit var bottomPanel: LinearLayout
     var controlsVisible = true
         private set
@@ -58,7 +59,8 @@ class PlaybackControls(
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(0xBB0B0E12.toInt())
         }
-        heading.addView(Ui.text(context, title, 16f, Color.WHITE).apply { maxLines = 1 }, LinearLayout.LayoutParams(-1, Ui.dp(context, 42)))
+        titleLabel = Ui.text(context, title, 16f, Color.WHITE).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }
+        heading.addView(titleLabel, LinearLayout.LayoutParams(-1, Ui.dp(context, 42)))
         heading.addView(HorizontalScrollView(context).apply {
             isHorizontalScrollBarEnabled = false
             addView(actions)
@@ -121,6 +123,8 @@ class PlaybackControls(
         if (changed) resetHideTimer()
         renderProgress()
     }
+
+    fun updateTitle(value: String) { titleLabel.text = value }
 
     private fun renderProgress() {
         val value = seekTarget ?: positionMs
@@ -210,7 +214,13 @@ class PlaybackControls(
         } else if (horizontal) {
             if (inActions) {
                 val index = (0 until actions.childCount).indexOfFirst { actions.getChildAt(it) === focused }
-                actions.getChildAt(index + if (code == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1)?.takeIf { it.isEnabled }?.requestFocus()
+                val direction = if (code == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1
+                var nextIndex = index + direction
+                while (nextIndex in 0 until actions.childCount) {
+                    val candidate = actions.getChildAt(nextIndex)
+                    if (candidate.visibility == View.VISIBLE && candidate.isEnabled && candidate.isFocusable && candidate.requestFocus()) break
+                    nextIndex += direction
+                }
                 resetHideTimer()
             } else {
                 val now = SystemClock.uptimeMillis()

@@ -35,8 +35,8 @@ android {
         applicationId = "com.lvsaber.bilitv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 19
-        versionName = "0.12.2"
+        versionCode = 23
+        versionName = "0.12.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -54,6 +54,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+            resValue("string", "app_name", "biliTv Debug")
+        }
+
         release {
             if (releaseSigningConfigured) {
                 signingConfig = signingConfigs.getByName("release")
@@ -66,12 +71,14 @@ android {
         }
     }
 
-    // Keep every debug build identifiable so test devices can retain and
-    // compare older APKs instead of silently overwriting app-debug.apk.
+    // Keep both build types identifiable so Debug and Release APKs can be
+    // installed and retained side by side without filename collisions.
     applicationVariants.all {
-        if (buildType.name == "debug") {
+        val variantType = buildType.name
+        if (variantType == "debug" || variantType == "release") {
             outputs.all {
-                (this as BaseVariantOutputImpl).outputFileName = "biliTv-debug-v${versionName}-vc${versionCode}.apk"
+                (this as BaseVariantOutputImpl).outputFileName =
+                    "biliTv-${variantType}-v${versionName}-vc${versionCode}.apk"
             }
         }
     }

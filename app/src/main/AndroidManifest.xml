@@ -19,41 +19,38 @@
         android:usesCleartextTraffic="false">
         <activity
             android:name=".ui.PlayerActivity"
-            android:exported="false"
-            android:screenOrientation="sensorLandscape" />
+            android:exported="false" />
+        <activity
+            android:name=".ui.BangumiActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ui.PgcDetailActivity"
+            android:exported="false" />
         <activity
             android:name=".ui.VideoDetailActivity"
-            android:exported="false"
-            android:screenOrientation="sensorLandscape" />
+            android:exported="false" />
         <activity
             android:name=".ui.UpProfileActivity"
-            android:exported="false"
-            android:screenOrientation="sensorLandscape" />
+            android:exported="false" />
         <activity
             android:name=".ui.FollowingActivity"
-            android:exported="false"
-            android:screenOrientation="sensorLandscape" />
+            android:exported="false" />
         <activity
             android:name=".ui.LoginActivity"
-            android:exported="false"
-            android:screenOrientation="sensorLandscape" />
+            android:exported="false" />
         <activity
             android:name=".ui.LibraryActivity"
-            android:exported="false"
-            android:screenOrientation="sensorLandscape" />
+            android:exported="false" />
         <activity
             android:name=".ui.SettingsActivity"
-            android:exported="false"
-            android:screenOrientation="sensorLandscape" />
+            android:exported="false" />
         <activity
             android:name=".ui.NetworkDiagnosticsActivity"
-            android:exported="false"
-            android:screenOrientation="sensorLandscape" />
+            android:exported="false" />
         <activity
             android:name=".ui.MainActivity"
             android:configChanges="screenSize|orientation|keyboardHidden"
-            android:exported="true"
-            android:screenOrientation="sensorLandscape">
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

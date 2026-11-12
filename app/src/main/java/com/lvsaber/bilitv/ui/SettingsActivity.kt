@@ -14,6 +14,8 @@ import com.lvsaber.bilitv.data.AppSettings
 import com.lvsaber.bilitv.data.HomeRailCatalog
 import com.lvsaber.bilitv.data.ChannelCatalog
 import com.lvsaber.bilitv.data.DanmakuSettings
+import com.lvsaber.bilitv.data.LiveCodecPreference
+import com.lvsaber.bilitv.data.LiveProtocolPreference
 
 class SettingsActivity : AppCompatActivity() {
     private lateinit var content: LinearLayout
@@ -26,7 +28,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private val sheetCache = mutableMapOf<String, Pair<NestedScrollView, LinearLayout>>()
-    private val categories = linkedMapOf("appearance" to "外观与布局", "channels" to "频道与轨道", "browse" to "浏览与加载", "playback" to "播放", "network" to "网络与线路", "danmaku" to "弹幕", "account" to "账号与存储", "about" to "关于")
+    private val categories = linkedMapOf("appearance" to "外观与布局", "channels" to "频道与轨道", "browse" to "浏览与加载", "playback" to "播放", "network" to "网络与线路", "danmaku" to "弹幕", "live" to "直播", "account" to "账号与存储", "about" to "关于")
     private val categoryButtons = mutableMapOf<String, Button>()
     private lateinit var sheetHost: android.widget.FrameLayout
     private var selectedSheet = "appearance"
@@ -262,6 +264,36 @@ class SettingsActivity : AppCompatActivity() {
                     }
                     content.addView(Ui.text(this, "设置自动保存；返回播放器即时生效，不重启视频。仅调整滚动弹幕，不支持智能防遮挡。", 14f, Ui.muted))
                 }
+                "live" -> {
+                    val qualityOptions = listOf(
+                        DisplayOption(0, "自动 · 直播间最高可用"),
+                        DisplayOption(30_000, "杜比"),
+                        DisplayOption(20_000, "4K"),
+                        DisplayOption(10_000, "原画"),
+                        DisplayOption(400, "蓝光"),
+                        DisplayOption(250, "超清"),
+                        DisplayOption(150, "高清"),
+                        DisplayOption(80, "流畅"),
+                    )
+                    val savedQuality = qualityOptions.firstOrNull { it.value == settings.liveQualityId }
+                        ?: qualityOptions.first()
+                    addChoiceRow("默认直播画质", "播放器只显示该房间接口实际返回的档位；当前不可用时回到自动。", qualityOptions, savedQuality) {
+                        settings = settings.copy(liveQualityId = it.value); saveAndRefresh()
+                    }
+                    addChoiceRow("默认直播编码", "自动优先 H.264；设备能力不支持时不请求该编码。", LiveCodecPreference.entries.toList(), settings.liveCodecPreference) {
+                        settings = settings.copy(liveCodecPreference = it); saveAndRefresh()
+                    }
+                    addChoiceRow("默认直播协议", "自动优先 HLS；仅使用接口返回且播放器支持的协议。", LiveProtocolPreference.entries.toList(), settings.liveProtocolPreference) {
+                        settings = settings.copy(liveProtocolPreference = it); saveAndRefresh()
+                    }
+                    addBooleanRow("播放故障自动恢复", settings.liveAutoRecoveryEnabled) {
+                        settings = settings.copy(liveAutoRecoveryEnabled = it); saveAndRefresh()
+                    }
+                    addBooleanRow("进入直播默认显示弹幕", settings.liveDanmakuEnabled) {
+                        settings = settings.copy(liveDanmakuEnabled = it); saveAndRefresh()
+                    }
+                    content.addView(Ui.text(this, "自动恢复只响应明确的起播/网络错误，最多尝试两次备线路或自动模式下的 HLS→FLV；不因短暂缓冲切线，不降低画质或更换编码。弹幕沿用“弹幕”页的区域、速度、字号、透明度和密度设置。", 14f, Ui.muted))
+                }
                 "account" -> {
                     content.addView(Ui.text(this, "账号进度独立保存，退出登录后使用访客记录。清理封面缓存保留观看进度和设置。", 14f, Ui.muted))
                     content.addView(Ui.button(this, "二维码登录") { startActivity(android.content.Intent(this, LoginActivity::class.java)) })
@@ -287,7 +319,7 @@ class SettingsActivity : AppCompatActivity() {
                     content.addView(Ui.text(this, "悬浮导航 · 历史回看 · 全局续播\n观看进度保存在本机；登录后按需读取云端历史。", 15f, Ui.muted))
                 }
             }
-            if (key in setOf("appearance", "browse", "playback", "network", "danmaku")) content.addView(Ui.chip(this, "恢复本页默认设置", false) {
+            if (key in setOf("appearance", "browse", "playback", "network", "danmaku", "live")) content.addView(Ui.chip(this, "恢复本页默认设置", false) {
                 confirm("恢复${categories[key]}的默认设置？") {
                     val defaults = AppSettings()
                     settings = when (key) {
@@ -295,6 +327,9 @@ class SettingsActivity : AppCompatActivity() {
                         "browse" -> settings.copy(railPrefetchEnabled = defaults.railPrefetchEnabled)
                         "network" -> settings.copy(autoRouteSwitchEnabled = defaults.autoRouteSwitchEnabled, routePolicy = defaults.routePolicy)
                         "danmaku" -> settings.copy(danmakuEnabled = defaults.danmakuEnabled, danmaku = defaults.danmaku)
+                        "live" -> settings.copy(liveQualityId = defaults.liveQualityId, liveCodecPreference = defaults.liveCodecPreference,
+                            liveProtocolPreference = defaults.liveProtocolPreference, liveAutoRecoveryEnabled = defaults.liveAutoRecoveryEnabled,
+                            liveDanmakuEnabled = defaults.liveDanmakuEnabled)
                         else -> settings.copy(defaultQuality = defaults.defaultQuality, videoFormat = defaults.videoFormat, videoCodec = defaults.videoCodec,
                             videoResizeMode = defaults.videoResizeMode, subtitleTextScale = defaults.subtitleTextScale)
                     }
@@ -562,6 +597,8 @@ class SettingsActivity : AppCompatActivity() {
         is AppSettings.VideoFormat -> value.label
         is AppSettings.VideoCodec -> value.label
         is AppSettings.RoutePolicy -> value.label
+        is LiveCodecPreference -> value.label
+        is LiveProtocolPreference -> value.label
         is QualityOption -> value.label
         is DisplayOption<*> -> value.label
         is com.lvsaber.bilitv.data.ChannelDefinition -> value.title

@@ -1029,6 +1029,141 @@ class BiliApiClient(context: Context) {
         } finally { connection.disconnect() }
     }
 
+    fun getLiveAreas(): List<LiveArea> {
+        val root = liveRequest("/room/v1/Area/getList", emptyMap(), cookie = null)
+        requireLiveSuccess(root)
+        return LiveApiParser.areas(root)
+    }
+
+    fun getLiveRecommendations(): List<LiveRoomSummary> {
+        val root = liveRequest(
+            "/xlive/web-interface/v1/webMain/getMoreRecList",
+            mapOf("platform" to "web", "web_location" to "333.1007"),
+        )
+        requireLiveSuccess(root)
+        return LiveApiParser.rooms(root)
+    }
+
+    /** Category ordering is server supplied: live_time (new starts) or online (popularity). */
+    fun getLiveCategoryRooms(parentAreaId: Int, areaId: Int, page: Int = 1, popularity: Boolean = false): List<LiveRoomSummary> {
+        val params = linkedMapOf(
+            "platform" to "web",
+            "parent_area_id" to parentAreaId.toString(),
+            "area_id" to areaId.toString(),
+            "sort_type" to if (popularity) "online" else "live_time",
+            "page" to page.coerceAtLeast(1).toString(),
+            "web_location" to "444.7",
+        )
+        // The current web room-list endpoint requires WBI signing. Calling this endpoint
+        // unsigned used to return -352, which looked like an empty category in the UI.
+        val root = getLiveSigned(
+            "/xlive/web-interface/v1/index/getList",
+            params,
+        )
+        return LiveApiParser.rooms(root)
+    }
+
+    fun searchLiveRooms(keyword: String, page: Int = 1): List<LiveRoomSummary> {
+        val params = linkedMapOf(
+            "search_type" to "live_room",
+            "keyword" to keyword,
+            "page" to page.coerceAtLeast(1).toString(),
+            "page_size" to LIVE_PAGE_SIZE.toString(),
+            "order" to "online",
+            "from_source" to "webtop_search",
+            "platform" to "pc",
+            "highlight" to "1",
+            "single_column" to "0",
+        )
+        val root = getSigned("/x/web-interface/wbi/search/type", params, LIVE_SEARCH_REFERER)
+        val code = root.optInt("code", 0)
+        if (code != 0) throw BiliApiException(code, root.optString("message", "直播搜索失败"))
+        val data = root.optJSONObject("data") ?: return emptyList()
+        val result = data.optJSONObject("result") ?: data
+        return LiveApiParser.rooms(JSONObject().put("data", result))
+    }
+
+    fun getLiveFollowing(): List<LiveRoomSummary> {
+        if (!hasSession()) throw BiliApiException(-101, "登录后才能查看正在直播的关注主播")
+        val root = liveRequest(
+            "/xlive/web-ucenter/v1/xfetter/GetWebList",
+            mapOf("hit_ab" to "false"),
+            referer = LIVE_REFERER,
+        )
+        requireLiveSuccess(root)
+        return LiveApiParser.rooms(root).filter { it.liveStatus == 1 || it.liveStatus == 2 }
+    }
+
+    fun getLiveRoomDetails(inputRoomId: Long): LiveRoomDetails {
+        require(inputRoomId > 0L) { "直播间号无效" }
+        val initRoot = liveRequest("/room/v1/Room/room_init", mapOf("id" to inputRoomId.toString()), cookie = null)
+        requireLiveSuccess(initRoot)
+        val initData = initRoot.optJSONObject("data") ?: throw BiliApiException(-500, "房间初始化数据为空")
+        val realRoomId = initData.optLong("room_id", inputRoomId).takeIf { it > 0L } ?: inputRoomId
+        val infoRoot = liveRequest("/room/v1/Room/get_info", mapOf("room_id" to realRoomId.toString()), cookie = null)
+        requireLiveSuccess(infoRoot)
+        return LiveApiParser.roomDetails(initRoot, infoRoot)
+    }
+
+    fun getLivePlayInfo(
+        roomId: Long,
+        qualityId: Int,
+        protocol: LiveProtocolPreference = LiveProtocolPreference.AUTO,
+        codec: LiveCodecPreference = LiveCodecPreference.AUTO,
+    ): Pair<List<LiveQualityOption>, List<LiveStreamProfile>> {
+        val protocols = when (protocol) {
+            LiveProtocolPreference.AUTO -> "0,1"
+            LiveProtocolPreference.HLS -> "1"
+            LiveProtocolPreference.FLV -> "0"
+        }
+        val formats = when (protocol) {
+            LiveProtocolPreference.AUTO -> "0,1,2"
+            LiveProtocolPreference.HLS -> "1,2"
+            LiveProtocolPreference.FLV -> "0"
+        }
+        val codecs = when (codec) {
+            LiveCodecPreference.AUTO -> "0,1"
+            LiveCodecPreference.AVC -> "0"
+            LiveCodecPreference.HEVC -> "1"
+        }
+        val root = liveRequest(
+            "/xlive/web-room/v2/index/getRoomPlayInfo",
+            mapOf(
+                "room_id" to roomId.toString(),
+                "protocol" to protocols,
+                "format" to formats,
+                "codec" to codecs,
+                "qn" to (qualityId.takeIf { it > 0 } ?: 10_000).toString(),
+                "platform" to "web",
+                "ptype" to "8",
+                "no_playurl" to "0",
+            ),
+            referer = "https://live.bilibili.com/$roomId",
+        )
+        requireLiveSuccess(root)
+        val (qualities, profiles) = LiveApiParser.playInfo(root, qualityId.takeIf { it > 0 } ?: 10_000)
+        if (profiles.isEmpty()) throw BiliApiException(-500, "直播间没有返回可用播放流")
+        return qualities to profiles
+    }
+
+    fun getLiveDanmakuConfig(roomId: Long): LiveDanmakuConfig {
+        val cookie = rankingCookie()
+        val root = getLiveSigned(
+            "/xlive/web-room/v1/index/getDanmuInfo",
+            mapOf("id" to roomId.toString(), "type" to "0", "web_location" to "444.8"),
+            cookie = cookie,
+        )
+        requireLiveSuccess(root)
+        val buvid3 = cookie.orEmpty().split(';')
+            .asSequence()
+            .map(String::trim)
+            .firstOrNull { it.startsWith("buvid3=") }
+            ?.substringAfter('=')
+            .orEmpty()
+        val uid = runCatching { getNavigation().optLong("mid") }.getOrDefault(0L)
+        return LiveApiParser.danmakuConfig(root, buvid3, uid)
+    }
+
     fun getNavigation(): JSONObject = requestRoot("/x/web-interface/nav").optJSONObject("data") ?: JSONObject()
 
     fun generateQrLogin(): QrLoginTicket {
@@ -1085,10 +1220,31 @@ class BiliApiClient(context: Context) {
         return response
     }
 
-    private fun getSigned(path: String, params: Map<String, String>): JSONObject {
+    private fun getSigned(path: String, params: Map<String, String>, referer: String? = HOME_REFERER): JSONObject {
         val (imgKey, subKey) = getWbiKeys()
         val signed = BiliWbiSigner.sign(params, imgKey, subKey, System.currentTimeMillis() / 1000)
-        return get(path, signed)
+        return get(path, signed, referer)
+    }
+
+    private fun getLiveSigned(path: String, params: Map<String, String>, cookie: String? = credentialStore.readCookie()): JSONObject {
+        val (imgKey, subKey) = getWbiKeys()
+        val signed = BiliWbiSigner.sign(params, imgKey, subKey, System.currentTimeMillis() / 1000)
+        val root = liveRequest(path, signed, cookie = cookie, referer = LIVE_REFERER)
+        val code = root.optInt("code", 0)
+        if (code != 0) throw BiliApiException(code, root.optString("message", "直播接口请求失败"))
+        return root
+    }
+
+    private fun liveRequest(
+        path: String,
+        params: Map<String, String>,
+        cookie: String? = credentialStore.readCookie(),
+        referer: String? = LIVE_REFERER,
+    ): JSONObject = requestRoot(LIVE_BASE_URL, path, params, cookie, referer)
+
+    private fun requireLiveSuccess(root: JSONObject) {
+        val code = root.optInt("code", 0)
+        if (code != 0) throw BiliApiException(code, root.optString("message", root.optString("msg", "直播接口请求失败")))
     }
 
     private fun getWbiKeys(): Pair<String, String> {
@@ -1281,11 +1437,15 @@ class BiliApiClient(context: Context) {
 
     companion object {
         private const val BASE_URL = "https://api.bilibili.com"
+        private const val LIVE_BASE_URL = "https://api.live.bilibili.com"
         private const val PASSPORT_BASE_URL = "https://passport.bilibili.com"
         private const val DASH_CAPABILITY_FLAGS = 4048
         private val DASH_QUALITY_IDS = setOf(74, 100, 112, 116, 120, 125, 126, 127, 129)
         private val HDR_QUALITY_IDS = setOf(125, 126, 129)
         private const val HOME_REFERER = "https://www.bilibili.com/"
+        private const val LIVE_REFERER = "https://live.bilibili.com/"
+        private const val LIVE_SEARCH_REFERER = "https://search.bilibili.com/live"
+        private const val LIVE_PAGE_SIZE = 20
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 13; Tablet) AppleWebKit/537.36 " +
                 "Chrome/131.0.0.0 Mobile Safari/537.36"

@@ -205,9 +205,12 @@ class MainActivity : AppCompatActivity() {
     private fun showZoneChooser() {
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("切换内容专区")
-            .setItems(arrayOf("视频专区", "番剧专区")) { _, which ->
-                if (which == 0) selectChannel("home")
-                else startActivity(Intent(this, BangumiActivity::class.java))
+            .setItems(arrayOf("视频专区", "番剧专区", "直播专区")) { _, which ->
+                when (which) {
+                    0 -> selectChannel("home")
+                    1 -> startActivity(Intent(this, BangumiActivity::class.java))
+                    else -> startActivity(Intent(this, LiveActivity::class.java))
+                }
             }
             .show()
     }

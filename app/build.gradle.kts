@@ -35,8 +35,8 @@ android {
         applicationId = "com.lvsaber.bilitv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 34
-        versionName = "0.12.16"
+        versionCode = 38
+        versionName = "0.12.20"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

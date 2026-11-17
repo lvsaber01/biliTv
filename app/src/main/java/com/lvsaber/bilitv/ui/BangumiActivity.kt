@@ -30,14 +30,13 @@ import com.lvsaber.bilitv.data.BiliApiException
 import com.lvsaber.bilitv.data.PgcCategory
 import com.lvsaber.bilitv.data.PgcEpisode
 import com.lvsaber.bilitv.data.PgcHomeFeedCache
+import com.lvsaber.bilitv.data.PgcHomeFeedItem
+import com.lvsaber.bilitv.data.PgcHomeFeedPolicy
 import com.lvsaber.bilitv.data.PgcIndexPage
 import com.lvsaber.bilitv.data.PgcJsonParser
 import com.lvsaber.bilitv.data.PgcPagingPolicy
-import com.lvsaber.bilitv.data.PgcProgress
 import com.lvsaber.bilitv.data.PgcSeason
-import java.util.concurrent.Callable
 import com.lvsaber.bilitv.data.PgcTimelineDay
-import com.lvsaber.bilitv.data.PgcTimelineItem
 import com.lvsaber.bilitv.data.ProgressRepository
 
 @UnstableApi
@@ -87,6 +86,13 @@ class BangumiActivity : AppCompatActivity() {
     private var indexFilterSummary: TextView? = null
     private var pendingSearch = ""
     private lateinit var zoneButton: Button
+    private var recommendationCategoryFilter: PgcCategory? = null
+    private var continueWatchingRail: HomeRail? = null
+    private var recommendationFeedRail: HomeRail? = null
+    private val recommendationFilterButtons = mutableMapOf<PgcCategory?, Button>()
+    private val recommendationFeeds = mutableMapOf<PgcCategory, List<PgcHomeFeedItem>>()
+    private val pendingRecommendationFeeds = mutableSetOf<PgcCategory>()
+    private val recommendationFeedErrors = mutableMapOf<PgcCategory, Throwable>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -115,6 +121,9 @@ class BangumiActivity : AppCompatActivity() {
             )
         }
         searchReturnPage = savedInstanceState?.getString(STATE_SEARCH_RETURN) ?: "recommend"
+        recommendationCategoryFilter = PgcCategory.fromSeasonType(
+            savedInstanceState?.getInt(STATE_RECOMMENDATION_FILTER, 0) ?: 0,
+        )
         setContentView(buildRoot())
         showPage(currentPage, reload = savedInstanceState == null)
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -125,7 +134,9 @@ class BangumiActivity : AppCompatActivity() {
                 else finish()
             }
         })
-        repository.refreshAccount { if (!isDestroyed && currentPage == "recommend") showPage("recommend") }
+        repository.refreshAccount {
+            if (!isDestroyed && currentPage == "recommend") refreshContinueWatchingRail()
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -141,6 +152,7 @@ class BangumiActivity : AppCompatActivity() {
         outState.putInt(STATE_INDEX_FINISHED, indexFinished?.let { if (it) 1 else 0 } ?: -1)
         outState.putInt(STATE_INDEX_ORDER, indexOrder)
         outState.putString(STATE_SEARCH_QUERY, pendingSearch)
+        outState.putInt(STATE_RECOMMENDATION_FILTER, recommendationCategoryFilter?.seasonType ?: 0)
         outState.putInt(STATE_INDEX_PAGE, indexPage)
         outState.putInt(STATE_FOLLOWING_PAGE, followingPage)
         outState.putInt(STATE_SEARCH_PAGE, searchPage)
@@ -281,6 +293,14 @@ class BangumiActivity : AppCompatActivity() {
 
     private fun showPage(key: String, reload: Boolean = true) {
         if (indexFilterPanel != null && key != "index") closeIndexFilterPanel(restoreFocus = false)
+        if (key != "recommend") {
+            continueWatchingRail = null
+            recommendationFeedRail = null
+            recommendationFilterButtons.clear()
+            recommendationFeeds.clear()
+            pendingRecommendationFeeds.clear()
+            recommendationFeedErrors.clear()
+        }
         val enteringPage = key != currentPage
         capturePagePosition()
         currentPage = key
@@ -417,16 +437,21 @@ class BangumiActivity : AppCompatActivity() {
         }
         body.addView(Ui.text(this, "番剧推荐", 18f, Ui.text).apply { setPadding(Ui.dp(context, 8), 0, 0, 0) },
             LinearLayout.LayoutParams(-1, Ui.dp(this, 32)))
-        val recent = repository.recentPgc().take(12).map { it.playable.toSeasonCard() }
-        if (recent.isNotEmpty()) addRail(body, "继续观看", recent, repository.recentPgc())
-        val airing = addLoadingRail(body, "最近放送")
+        continueWatchingRail = addLoadingRail(body, "继续观看", initiallyHidden = true).apply {
+            section.tag = "pgc-home-continue"
+        }
+        refreshContinueWatchingRail()
+        val airing = addLoadingRail(body, "最近放送", headerContent = ::addRecommendationCategoryFilters).apply {
+            section.tag = "pgc-home-airing"
+        }
+        recommendationFeedRail = airing
         scroll.addView(body); content.addView(scroll)
         val token = pageGeneration
         loadHomeTimelineRail(token, airing)
     }
 
     private class HomeRail(
-        val row: LinearLayout,
+        val section: LinearLayout,
         val status: TextView,
         val list: RecyclerView,
         val adapter: PgcSeasonAdapter,
@@ -437,13 +462,25 @@ class BangumiActivity : AppCompatActivity() {
         var canRequestMore = false
         var loading = false
         var requestMore: ((Int) -> List<PgcSeason>)? = null
-        var cacheKey: String? = null
         val hasMore: Boolean get() = visibleCount < items.size || canRequestMore
     }
-    private fun addLoadingRail(body: LinearLayout, title: String): HomeRail {
-        body.addView(Ui.text(this, title, 19f, Ui.text).apply { setPadding(Ui.dp(context, 8), Ui.dp(context, 10), 0, Ui.dp(context, 5)) })
+    private fun addLoadingRail(
+        body: LinearLayout,
+        title: String,
+        initiallyHidden: Boolean = false,
+        headerContent: ((LinearLayout) -> Unit)? = null,
+    ): HomeRail {
+        val section = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = if (initiallyHidden) View.GONE else View.VISIBLE
+        }
+        val header = horizontalRow()
+        header.addView(Ui.text(this, title, 19f, Ui.text).apply {
+            setPadding(Ui.dp(context, 8), Ui.dp(context, 10), 0, Ui.dp(context, 5))
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        headerContent?.invoke(header)
+        section.addView(header, LinearLayout.LayoutParams(-1, -2))
         val status = Ui.text(this, "正在加载…", 13f, Ui.muted)
-        val row = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val rv = RecyclerView(this).apply {
             layoutManager = LinearLayoutManager(this@BangumiActivity, RecyclerView.HORIZONTAL, false)
             itemAnimator = null
@@ -452,9 +489,10 @@ class BangumiActivity : AppCompatActivity() {
         val itemWidthDp = (Ui.railCardWidth(this, pageWidthPx) / resources.displayMetrics.density).toInt().coerceAtLeast(132)
         val adapter = PgcSeasonAdapter({ openDetail(it.seasonId) }, itemWidthDp = itemWidthDp)
         rv.adapter = adapter
-        row.addView(status); row.addView(rv, LinearLayout.LayoutParams(-1, -2))
-        body.addView(row)
-        val rail = HomeRail(row, status, rv, adapter)
+        section.addView(status)
+        section.addView(rv, LinearLayout.LayoutParams(-1, -2))
+        body.addView(section)
+        val rail = HomeRail(section, status, rv, adapter)
         rv.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
                 val manager = recyclerView.layoutManager as? LinearLayoutManager ?: return
@@ -473,57 +511,115 @@ class BangumiActivity : AppCompatActivity() {
         return rail
     }
 
-    private fun addRail(body: LinearLayout, title: String, seasons: List<PgcSeason>, progress: List<PgcProgress> = emptyList()) {
-        if (seasons.isEmpty()) return
-        val rail = addLoadingRail(body, title)
-        rail.items = seasons.distinctBy { it.seasonId }
-        rail.visibleCount = minOf(RAIL_BATCH_SIZE, rail.items.size)
-        rail.adapter.setProgress(progress)
-        rail.adapter.submitList(rail.items.take(rail.visibleCount))
-        rail.status.visibility = View.GONE
+    private fun addRecommendationCategoryFilters(header: LinearLayout) {
+        recommendationFilterButtons.clear()
+        listOf(
+            null to "全部",
+            PgcCategory.JAPANESE_ANIME to "日本动画",
+            PgcCategory.GUOCHUANG to "国创动画",
+        ).forEach { (category, label) ->
+            val button = Ui.chip(this, label, recommendationCategoryFilter == category) {
+                recommendationCategoryFilter = category
+                recommendationFilterButtons.forEach { (value, chip) -> Ui.setChipSelected(chip, value == category) }
+                recommendationFeedRail?.let { renderRecommendationFeed(it, resetVisible = true) }
+            }.apply {
+                tag = "pgc-home-filter/${category?.seasonType ?: "all"}"
+            }
+            recommendationFilterButtons[category] = button
+            header.addView(button, LinearLayout.LayoutParams(-2, Ui.dp(this, if (Ui.isTelevision(this)) 38 else 44)).apply {
+                marginStart = Ui.dp(this@BangumiActivity, 5)
+            })
+        }
     }
 
     private fun loadHomeTimelineRail(token: Int, rail: HomeRail) {
-        val cacheKey = "timeline:0:7"
-        rail.cacheKey = cacheKey
-        PgcHomeFeedCache.get(cacheKey)?.let { cached ->
-            rail.items = cached.distinctBy { it.seasonId }
-            rail.visibleCount = minOf(RAIL_BATCH_SIZE, rail.items.size)
-            rail.adapter.submitList(rail.items.take(rail.visibleCount))
-            rail.status.visibility = View.GONE
+        val categories = listOf(PgcCategory.JAPANESE_ANIME, PgcCategory.GUOCHUANG)
+        recommendationFeeds.clear()
+        pendingRecommendationFeeds.clear()
+        recommendationFeedErrors.clear()
+        categories.forEach { category ->
+            PgcHomeFeedCache.get(timelineCacheKey(category))?.let { recommendationFeeds[category] = it }
         }
-        rail.loading = true
-        rail.status.text = if (rail.items.isEmpty()) "正在加载…" else ""
-        rail.status.visibility = if (rail.items.isEmpty()) View.VISIBLE else View.GONE
-        AppExecutors.io.execute {
-            val result = runCatching {
-                val japanese = AppExecutors.browse.submit(Callable {
-                    api.getPgcTimeline(PgcCategory.JAPANESE_ANIME, before = 7, after = 7)
-                })
-                val guochuang = AppExecutors.browse.submit(Callable {
-                    api.getPgcTimeline(PgcCategory.GUOCHUANG, before = 7, after = 7)
-                })
-                (japanese.get().flatMap { it.items } + guochuang.get().flatMap { it.items })
-                    .distinctBy { it.season.seasonId }
-                    .map { item -> item.season.copy(indexShow = item.episode.displayTitle, newestEpisode = item.airTime) }
-            }
-            runOnUiThread {
-                if (token != pageGeneration || isFinishing || isDestroyed) return@runOnUiThread
-                rail.loading = false
-                result.onSuccess { items ->
-                    rail.items = items
-                    rail.visibleCount = minOf(RAIL_BATCH_SIZE, items.size)
-                    PgcHomeFeedCache.put(cacheKey, items)
-                    rail.adapter.submitList(items.take(rail.visibleCount)) { restoreCurrentPageFocus() }
-                    rail.status.text = if (items.isEmpty()) "近期没有放送条目" else ""
-                    rail.status.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
-                }.onFailure { error ->
-                    rail.status.text = if (rail.items.isEmpty()) "加载失败：${friendlyMessage(error)}" else "已显示缓存内容 · 更新失败：${friendlyMessage(error)}"
-                    rail.status.visibility = View.VISIBLE
-                }
-            }
+        pendingRecommendationFeeds.addAll(categories)
+        renderRecommendationFeed(rail, resetVisible = true)
+        categories.forEach { category ->
+            val scheduled = PgcHomeFeedCache.refreshIfStale(
+                key = timelineCacheKey(category),
+                executor = AppExecutors.browse,
+                loader = { publishProgress ->
+                    val days = api.getPgcTimeline(category, before = 7, after = 7) { partialDays ->
+                        publishProgress(PgcHomeFeedPolicy.fromTimeline(partialDays))
+                    }
+                    PgcHomeFeedPolicy.fromTimeline(days)
+                },
+                onProgress = { items ->
+                    runOnUiThread {
+                        if (!isCurrent(token) || currentPage != "recommend") return@runOnUiThread
+                        recommendationFeeds[category] = items
+                        renderRecommendationFeed(rail, resetVisible = false)
+                    }
+                },
+                onComplete = { result ->
+                    runOnUiThread {
+                        if (!isCurrent(token) || currentPage != "recommend") return@runOnUiThread
+                        pendingRecommendationFeeds.remove(category)
+                        result.onSuccess { items ->
+                            recommendationFeeds[category] = items
+                            recommendationFeedErrors.remove(category)
+                        }.onFailure { error -> recommendationFeedErrors[category] = error }
+                        renderRecommendationFeed(rail, resetVisible = false)
+                    }
+                },
+            )
+            if (!scheduled) pendingRecommendationFeeds.remove(category)
         }
+        renderRecommendationFeed(rail, resetVisible = false)
     }
+
+    private fun renderRecommendationFeed(rail: HomeRail, resetVisible: Boolean) {
+        val merged = PgcHomeFeedPolicy.merge(recommendationFeeds.values)
+        val seasons = PgcHomeFeedPolicy.filter(merged, recommendationCategoryFilter)
+        val oldVisibleCount = rail.visibleCount
+        rail.items = seasons
+        rail.visibleCount = when {
+            seasons.isEmpty() -> 0
+            resetVisible -> minOf(RAIL_BATCH_SIZE, seasons.size)
+            else -> maxOf(minOf(oldVisibleCount, seasons.size), minOf(RAIL_BATCH_SIZE, seasons.size))
+        }
+        rail.adapter.submitList(seasons.take(rail.visibleCount)) {
+            if (resetVisible) rail.list.scrollToPosition(0)
+            restoreCurrentPageFocus()
+        }
+        val relevantCategories = recommendationCategoryFilter?.let(::listOf)
+            ?: listOf(PgcCategory.JAPANESE_ANIME, PgcCategory.GUOCHUANG)
+        val isLoading = relevantCategories.any { it in pendingRecommendationFeeds }
+        val errors = relevantCategories.mapNotNull(recommendationFeedErrors::get)
+        // A background refresh must not stop the rail from revealing cards already in cache.
+        rail.loading = false
+        val statusText = when {
+            seasons.isNotEmpty() && errors.isNotEmpty() && !isLoading -> "部分内容更新失败，已保留可用条目"
+            seasons.isNotEmpty() -> ""
+            isLoading -> "正在加载近期放送…"
+            errors.isNotEmpty() -> "加载失败：${friendlyMessage(errors.first())}"
+            else -> "近期没有放送条目"
+        }
+        rail.status.text = statusText
+        rail.status.visibility = if (statusText.isBlank()) View.GONE else View.VISIBLE
+    }
+
+    private fun refreshContinueWatchingRail() {
+        val rail = continueWatchingRail ?: return
+        val progress = PgcHomeFeedPolicy.continueWatching(repository.recentPgc())
+        val seasons = progress.map { it.playable.toSeasonCard() }
+        rail.items = seasons
+        rail.visibleCount = minOf(RAIL_BATCH_SIZE, seasons.size)
+        rail.adapter.setProgress(progress)
+        rail.adapter.submitList(seasons.take(rail.visibleCount)) { restoreCurrentPageFocus() }
+        rail.section.visibility = if (seasons.isEmpty()) View.GONE else View.VISIBLE
+        rail.status.visibility = View.GONE
+    }
+
+    private fun timelineCacheKey(category: PgcCategory) = "timeline:${category.seasonType}:7:7"
 
     private fun appendHomeRailBatch(rail: HomeRail) {
         if (rail.loading || !rail.hasMore || currentPage != "recommend") return
@@ -550,7 +646,6 @@ class BangumiActivity : AppCompatActivity() {
                     rail.requestedLimit = requestedLimit
                     rail.items = response.distinctBy { it.seasonId }
                     rail.canRequestMore = rail.items.size > previousCount && response.size >= requestedLimit && requestedLimit < PgcPagingPolicy.MAX_RANKING_ITEMS
-                    rail.cacheKey?.let { PgcHomeFeedCache.put(it, rail.items) }
                     rail.visibleCount = PgcPagingPolicy.nextVisibleCount(rail.visibleCount, rail.items.size, RAIL_BATCH_SIZE)
                     rail.adapter.submitList(rail.items.take(rail.visibleCount)) { restoreCurrentPageFocus() }
                 }.onFailure { error ->
@@ -1203,6 +1298,7 @@ class BangumiActivity : AppCompatActivity() {
         private const val STATE_INDEX_FINISHED = "bangumi_index_finished"
         private const val STATE_INDEX_ORDER = "bangumi_index_order"
         private const val STATE_SEARCH_QUERY = "bangumi_search_query"
+        private const val STATE_RECOMMENDATION_FILTER = "bangumi_recommendation_filter"
         private const val STATE_INDEX_PAGE = "bangumi_index_page"
         private const val STATE_FOLLOWING_PAGE = "bangumi_following_page"
         private const val STATE_SEARCH_PAGE = "bangumi_search_page"

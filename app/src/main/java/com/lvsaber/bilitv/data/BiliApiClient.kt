@@ -639,7 +639,12 @@ class BiliApiClient(context: Context) {
         return parsePlayerInfo(root)
     }
 
-    fun getPgcTimeline(category: PgcCategory, before: Int = 0, after: Int = 7): List<PgcTimelineDay> {
+    fun getPgcTimeline(
+        category: PgcCategory,
+        before: Int = 0,
+        after: Int = 7,
+        onPartialVerified: ((List<PgcTimelineDay>) -> Unit)? = null,
+    ): List<PgcTimelineDay> {
         val root = get("/pgc/web/timeline", mapOf(
             "types" to category.seasonType.toString(), "before" to before.coerceIn(0, 7).toString(),
             "after" to after.coerceIn(0, 7).toString(),
@@ -650,18 +655,39 @@ class BiliApiClient(context: Context) {
             .map { it.season.seasonId }
             .distinct()
             .toList()
+        val verified = mutableMapOf<Long, PgcSeason>()
+        PgcJsonParser.filterTimelineByVerifiedScopes(days, verified)
+            .takeIf { it.isNotEmpty() }
+            ?.let { onPartialVerified?.invoke(it) }
         if (unresolvedIds.isEmpty()) return days
         var verificationError: Exception? = null
-        val verified = buildMap {
-            unresolvedIds.forEach { seasonId ->
-                val season = pgcScopeCache[seasonId] ?: try {
-                    loadPgcSeasonScope(seasonId)
+        unresolvedIds.chunked(PGC_SCOPE_VERIFY_PARALLELISM).forEach { batch ->
+            val pending = batch.mapNotNull { seasonId ->
+                val cached = pgcScopeCache[seasonId]
+                if (cached != null) {
+                    if (cached.category == category && cached.scopeVerified) verified[seasonId] = cached
+                    null
+                } else {
+                    val future = runCatching {
+                        AppExecutors.pgcScope.submit(Callable { loadPgcSeasonScope(seasonId) })
+                    }.getOrNull()
+                    seasonId to future
+                }
+            }
+            pending.forEach { (seasonId, future) ->
+                val season = try {
+                    future?.get() ?: loadPgcSeasonScope(seasonId)
                 } catch (error: Exception) {
-                    if (error !is BiliApiException || error.apiCode != -422) verificationError = verificationError ?: error
+                    val cause = error.cause as? Exception ?: error
+                    if (cause is InterruptedException) Thread.currentThread().interrupt()
+                    if (cause !is BiliApiException || cause.apiCode != -422) verificationError = verificationError ?: cause
                     null
                 }
-                if (season != null && season.category == category && season.scopeVerified) put(seasonId, season)
+                if (season != null && season.category == category && season.scopeVerified) verified[seasonId] = season
             }
+            PgcJsonParser.filterTimelineByVerifiedScopes(days, verified)
+                .takeIf { it.isNotEmpty() }
+                ?.let { onPartialVerified?.invoke(it) }
         }
         val filtered = PgcJsonParser.filterTimelineByVerifiedScopes(days, verified)
         if (filtered.isEmpty()) verificationError?.let { throw it }

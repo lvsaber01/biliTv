@@ -16,7 +16,7 @@ import kotlin.math.ceil
 @UnstableApi
 class VideoCard(context: Context, @Suppress("UNUSED_PARAMETER") grid: Boolean = false) : LinearLayout(context) {
     private val poster = Ui.poster(context)
-    private val title = Ui.text(context, size = 15f)
+    private val title = Ui.text(context, size = 14f)
     private val subtitle = Ui.text(context, size = 11.5f, color = Ui.muted)
     private val stats = Ui.text(context, size = 11f, color = Ui.muted)
     private val progressBar = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply {
@@ -32,7 +32,7 @@ class VideoCard(context: Context, @Suppress("UNUSED_PARAMETER") grid: Boolean = 
         clipToOutline = true
         isClickable = true
         isFocusable = true
-        setPadding(Ui.dp(context, 6), Ui.dp(context, 2), Ui.dp(context, 6), Ui.dp(context, 2))
+        setPadding(Ui.dp(context, 6), Ui.dp(context, 2), Ui.dp(context, 6), Ui.dp(context, 4))
         val cover = FrameLayout(context)
         cover.addView(poster, FrameLayout.LayoutParams(-1, -2))
         cover.addView(progressBar, FrameLayout.LayoutParams(-1, Ui.dp(context, 5), Gravity.BOTTOM))
@@ -44,12 +44,12 @@ class VideoCard(context: Context, @Suppress("UNUSED_PARAMETER") grid: Boolean = 
         title.setLineSpacing(0f, 1f)
         title.minHeight = Ui.dp(context, ceil(36f * resources.configuration.fontScale.coerceAtLeast(1f)).toInt())
         addView(title, LayoutParams(-1, -2))
-        listOf(subtitle, stats).forEach { label ->
+        listOf(subtitle to 14f, stats to 18f).forEach { (label, rowHeight) ->
             label.maxLines = 1
             label.ellipsize = android.text.TextUtils.TruncateAt.END
             label.includeFontPadding = false
             label.setPadding(2, 0, 2, 0)
-            val metadataHeight = ceil(14f * resources.configuration.fontScale.coerceAtLeast(1f)).toInt()
+            val metadataHeight = ceil(rowHeight * resources.configuration.fontScale.coerceAtLeast(1f)).toInt()
             addView(label, LayoutParams(-1, Ui.dp(context, metadataHeight)))
         }
         Ui.focusHighlight(this)

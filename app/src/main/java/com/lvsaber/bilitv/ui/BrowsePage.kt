@@ -1,7 +1,6 @@
 package com.lvsaber.bilitv.ui
 
 import android.content.Context
-import android.content.Intent
 import android.os.SystemClock
 import android.view.Gravity
 import android.view.KeyEvent
@@ -10,7 +9,6 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.widget.NestedScrollView
@@ -72,6 +70,22 @@ private class RailEdgeGestureRecyclerView(
     private var downY = 0f
     private var startedAtLeadingEdge = false
     private var refreshSwipeCaptured = false
+
+    override fun focusSearch(focused: View, direction: Int): View? {
+        val candidate = super.focusSearch(focused, direction)
+        val candidateInsideRail = candidate?.let(::isInThisRail) == true
+        if (shouldBlockHorizontalRailEscape(direction, candidateInsideRail)) return focused
+        return candidate
+    }
+
+    private fun isInThisRail(candidate: View): Boolean {
+        var current: View? = candidate
+        while (current != null) {
+            if (current === this) return true
+            current = current.parent as? View
+        }
+        return false
+    }
 
     override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
         if (!refreshEnabled) return super.onInterceptTouchEvent(event)
@@ -173,6 +187,9 @@ internal fun shouldAppendRailAtScrollEnd(
     itemCount: Int,
 ): Boolean = userScrolled && active && reachedEnd && itemCount > 0
 
+internal fun shouldBlockHorizontalRailEscape(direction: Int, targetInsideRail: Boolean): Boolean =
+    (direction == View.FOCUS_LEFT || direction == View.FOCUS_RIGHT) && !targetInsideRail
+
 /** A page keeps its data and scroll state while switching channels. */
 @UnstableApi
 class BrowsePage(
@@ -219,15 +236,10 @@ class BrowsePage(
     private var focusRail: Rail? = null
     private var active = false
     private var disposed = false
-    private var hero: View? = null
-    private var heroImage: ImageView? = null
-    private var heroVideo: VideoSummary? = null
     private val coverScope = CoverLoader.newScope()
-    private val heroHost = FrameLayout(context)
     private var verticalPosition = 0
     private var lastFocusedRail: Rail? = null
     private val grid = channel == null && settings.homeStyle == AppSettings.HomeStyle.GRID
-    private val showHero = channel == null && settings.heroEnabled && !grid
     private val cardWidth get() = Ui.railCardWidth(context, width.takeIf { it > 0 }
         ?: (resources.displayMetrics.widthPixels - Ui.dp(context, 40)))
 
@@ -236,7 +248,7 @@ class BrowsePage(
         if (w != oldw && w > 0 && !grid) post {
             rails.forEach { rail ->
                 rail.list.layoutParams = (rail.list.layoutParams as LayoutParams).apply {
-                    height = Ui.cardHeight(context, cardWidth) + Ui.dp(context, 8)
+                    height = Ui.cardHeight(context, cardWidth) + Ui.dp(context, 7)
                 }
                 rail.adapter.notifyDataSetChanged()
             }
@@ -247,10 +259,6 @@ class BrowsePage(
         orientation = VERTICAL
         val definitions = if (grid) listOf(BrowseRail("featured", "热门精选", BrowseSource.POPULAR))
             else channel?.let { ChannelCatalog.rails(it, settings) } ?: ChannelCatalog.homeRails(settings)
-        if (showHero && definitions.isNotEmpty()) {
-            heroHost.addView(Ui.text(context, "正在准备本期推荐…", 20f))
-            body.addView(heroHost, LayoutParams(-1, Ui.dp(context, 40)).apply { bottomMargin = Ui.dp(context, 4) })
-        }
         if (definitions.isEmpty()) {
             body.addView(Ui.text(context, "当前没有启用轨道，请到设置中开启。", 18f))
             body.addView(Ui.button(context, "打开轨道设置", openSettings))
@@ -272,19 +280,12 @@ class BrowsePage(
             }
         }
         post {
-            heroVideo?.let { video ->
-                heroImage?.let { image ->
-                    CoverLoader.load(image, video.coverUrl, 1024, coverScope,
-                        if (image.isAttachedToWindow) CoverLoader.Priority.VISIBLE else CoverLoader.Priority.NORMAL)
-                }
-            }
             scroll.scrollTo(0, verticalPosition)
             val remembered = lastFocusedRail
             if (remembered != null && remembered.items.isNotEmpty()) focusCard(remembered, remembered.focusIndex)
             else rails.firstOrNull()?.let { first ->
                 focusRail = first
-                if (hero != null) hero?.requestFocus()
-                else if (first.items.isNotEmpty()) focusCard(first, first.focusIndex)
+                if (first.items.isNotEmpty()) focusCard(first, first.focusIndex)
                 else first.focusWhenReady = true
             }
             loadNearby()
@@ -362,7 +363,7 @@ class BrowsePage(
                 }
             })
         }
-        body.addView(rail.list, LayoutParams(-1, if (grid) Ui.dp(context, 620) else Ui.cardHeight(context, cardWidth) + Ui.dp(context, 8)).apply { bottomMargin = Ui.dp(context, 2) })
+        body.addView(rail.list, LayoutParams(-1, if (grid) Ui.dp(context, 620) else Ui.cardHeight(context, cardWidth) + Ui.dp(context, 7)))
         // Empty and failed rails still have a D-pad landing point.
         rail.status.isFocusable = true
         Ui.focusHighlight(rail.status)
@@ -407,7 +408,6 @@ class BrowsePage(
                     smoothToAppendedCard = focusNew && oldSize > 0,
                 )
             }
-            if (showHero && oldSize == 0 && rail === rails.firstOrNull()) addHero(newItems.first())
         }
         status(rail)
     }
@@ -500,9 +500,6 @@ class BrowsePage(
                         rail.focusWhenReady = active && !rail.focusAfterRefresh &&
                             (focusRail === rail || lastFocusedRail === rail)
                         rail.prefetchAt = -1
-                        if (showHero && rail === rails.firstOrNull() && refreshed.isNotEmpty()) {
-                            addHero(refreshed.first())
-                        }
                     } else {
                         rail.buffer.add(result.videos)
                         rail.buffer.nextPage = result.nextPage
@@ -632,7 +629,7 @@ class BrowsePage(
     private fun moveVertical(rail: Rail, delta: Int) {
         val target = rails.getOrNull(rails.indexOf(rail) + delta)
         if (target == null) {
-            if (delta < 0) hero?.requestFocus() ?: leaveToNavigation()
+            if (delta < 0) leaveToNavigation()
             return
         }
         focusRail = target
@@ -667,36 +664,6 @@ class BrowsePage(
             if (attempt < maxAttempts) rail.list.postOnAnimation { request(attempt + 1) }
         }
         rail.list.post { request(0) }
-    }
-
-    private fun addHero(video: VideoSummary) {
-        heroImage?.let(CoverLoader::cancel)
-        val card = FrameLayout(context).apply {
-            isFocusable = true
-            isClickable = true
-            background = Ui.panel(context)
-            setOnClickListener { context.startActivity(Intent(context, VideoDetailActivity::class.java).putExtra(VideoDetailActivity.EXTRA_BVID, video.bvid)) }
-            setOnKeyListener { _, key, event ->
-                if (event.action == KeyEvent.ACTION_DOWN && key == KeyEvent.KEYCODE_DPAD_DOWN) {
-                    rails.firstOrNull()?.let { focusCard(it, it.focusIndex) }; true
-                } else if (event.action == KeyEvent.ACTION_DOWN && key == KeyEvent.KEYCODE_DPAD_UP) { leaveToNavigation(); true } else false
-            }
-        }
-        val image = Ui.poster(context)
-        card.addView(image, FrameLayout.LayoutParams(-1, -1))
-        val label = Ui.text(context, "本期推荐 · ${video.title}", 14f).apply {
-            setBackgroundColor(0xB00B0E12.toInt()); gravity = Gravity.CENTER_VERTICAL; maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
-        }
-        card.addView(label, FrameLayout.LayoutParams(-1, -1))
-        heroImage = image
-        heroVideo = video
-        CoverLoader.load(image, video.coverUrl, 1024, coverScope,
-            if (image.isAttachedToWindow) CoverLoader.Priority.VISIBLE else CoverLoader.Priority.NORMAL)
-        Ui.focusHighlight(card)
-        hero = card
-        heroHost.removeAllViews()
-        heroHost.addView(card, FrameLayout.LayoutParams(-1, -1))
     }
 
     private inner class Cards(private val rail: Rail) : RecyclerView.Adapter<CardHolder>() {

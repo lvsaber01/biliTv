@@ -127,7 +127,6 @@ class PlaybackControls(
             gravity = Gravity.CENTER_VERTICAL
             orientation = LinearLayout.HORIZONTAL
             clipChildren = false
-            background = Ui.roundedBackground(0x66101820, Ui.dp(context, 42))
             setPadding(Ui.dp(context, 8), Ui.dp(context, 8), Ui.dp(context, 8), Ui.dp(context, 8))
         }
         rewindButton = Ui.chip(context, "↶", false) { stepSeek(-1); commitSeek() }.apply {

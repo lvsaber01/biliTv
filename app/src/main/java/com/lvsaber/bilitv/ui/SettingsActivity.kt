@@ -191,7 +191,6 @@ class SettingsActivity : AppCompatActivity() {
                     addChoiceRow("网格每行视频数", "首页网格布局", listOf(1, 2, 3), settings.gridColumns) {
                         settings = settings.copy(gridColumns = it); saveAndRefresh()
                     }
-                    addBooleanRow("显示首页头部推荐", settings.heroEnabled) { settings = settings.copy(heroEnabled = it); saveAndRefresh() }
                 }
                 "channels" -> { addSection("首页轨道"); addRailManagement(); addChannelManagement() }
                 "browse" -> {
@@ -325,7 +324,7 @@ class SettingsActivity : AppCompatActivity() {
                 confirm("恢复${categories[key]}的默认设置？") {
                     val defaults = AppSettings()
                     settings = when (key) {
-                        "appearance" -> settings.copy(homeStyle = defaults.homeStyle, gridColumns = defaults.gridColumns, heroEnabled = defaults.heroEnabled)
+                        "appearance" -> settings.copy(homeStyle = defaults.homeStyle, gridColumns = defaults.gridColumns)
                         "browse" -> settings.copy(railPrefetchEnabled = defaults.railPrefetchEnabled)
                         "network" -> settings.copy(autoRouteSwitchEnabled = defaults.autoRouteSwitchEnabled, routePolicy = defaults.routePolicy)
                         "danmaku" -> settings.copy(danmakuEnabled = defaults.danmakuEnabled, danmaku = defaults.danmaku)

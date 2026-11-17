@@ -68,7 +68,6 @@ data class AppSettings(
     val hiddenRailKeys: Set<String> = HomeRailCatalog.defaultHiddenKeys,
     /** Prefetch near the end of a rail; pressing right on the last card always remains explicit. */
     val railPrefetchEnabled: Boolean = true,
-    val heroEnabled: Boolean = true,
     val channelOrder: List<String> = ChannelCatalog.keys,
     val hiddenTopChannels: Set<String> = (ChannelCatalog.keys - ChannelCatalog.defaultPinned.toSet()).toSet(),
     val channelRailOrders: Map<String, List<String>> = emptyMap(),
@@ -133,7 +132,6 @@ data class AppSettings(
             .putString(KEY_RAIL_ORDER, HomeRailCatalog.normalizeOrder(railOrder).joinToString(","))
             .putStringSet(KEY_HIDDEN_RAILS, hiddenRailKeys.intersect(HomeRailCatalog.defaultKeys.toSet()))
             .putBoolean(KEY_RAIL_PREFETCH, railPrefetchEnabled)
-            .putBoolean(KEY_HERO_ENABLED, heroEnabled)
             .putString("channel_order", normalizedChannelOrder.joinToString(","))
             .putStringSet("hidden_top_channels", hiddenChannels + overflowPinned)
             .putString("channel_rail_orders", JSONObject().apply {
@@ -165,7 +163,6 @@ data class AppSettings(
         private const val KEY_RAIL_ORDER = "rail_order"
         private const val KEY_HIDDEN_RAILS = "hidden_rail_keys"
         private const val KEY_RAIL_PREFETCH = "rail_prefetch_enabled"
-        private const val KEY_HERO_ENABLED = "hero_enabled"
         private const val KEY_LIVE_QUALITY = "live_quality_id"
         private const val KEY_LIVE_CODEC = "live_codec_preference"
         private const val KEY_LIVE_PROTOCOL = "live_protocol_preference"
@@ -269,7 +266,6 @@ data class AppSettings(
                 railOrder = homeOrder,
                 hiddenRailKeys = hiddenRails,
                 railPrefetchEnabled = prefs.getBoolean(KEY_RAIL_PREFETCH, true),
-                heroEnabled = prefs.getBoolean(KEY_HERO_ENABLED, true),
                 channelOrder = channelOrder,
                 hiddenTopChannels = hiddenTopChannels,
                 channelRailOrders = parsedChannelRailOrders,

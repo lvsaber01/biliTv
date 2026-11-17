@@ -4,6 +4,7 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -13,6 +14,8 @@ import com.lvsaber.bilitv.data.AppSettings
 import com.lvsaber.bilitv.data.HomeRailCatalog
 import com.lvsaber.bilitv.data.ChannelCatalog
 import com.lvsaber.bilitv.data.DanmakuSettings
+import com.lvsaber.bilitv.data.LiveCodecPreference
+import com.lvsaber.bilitv.data.LiveProtocolPreference
 
 class SettingsActivity : AppCompatActivity() {
     private lateinit var content: LinearLayout
@@ -21,11 +24,13 @@ class SettingsActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         settings = AppSettings.load(this)
-        setContentView(buildPage())
+        val page = buildPage()
+        setContentView(page)
+        page.post { categoryButtons[selectedSheet]?.requestFocus() }
     }
 
     private val sheetCache = mutableMapOf<String, Pair<NestedScrollView, LinearLayout>>()
-    private val categories = linkedMapOf("appearance" to "外观与布局", "channels" to "频道与轨道", "browse" to "浏览与加载", "playback" to "播放", "network" to "网络与线路", "danmaku" to "弹幕", "account" to "账号与存储", "about" to "关于")
+    private val categories = linkedMapOf("appearance" to "外观与布局", "channels" to "频道与轨道", "browse" to "浏览与加载", "playback" to "播放", "network" to "网络与线路", "danmaku" to "弹幕", "live" to "直播", "account" to "账号与存储", "about" to "关于")
     private val categoryButtons = mutableMapOf<String, Button>()
     private lateinit var sheetHost: android.widget.FrameLayout
     private var selectedSheet = "appearance"
@@ -90,15 +95,20 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun buildPage(): View {
         val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setBackgroundColor(Ui.background)
-            setPadding(Ui.dp(context, 20), Ui.dp(context, 14), Ui.dp(context, 20), Ui.dp(context, 18))
+            orientation = LinearLayout.VERTICAL; background = Ui.pageBackground(context)
+            setPadding(Ui.pageInset(context), Ui.dp(context, 14), Ui.pageInset(context), Ui.dp(context, 18))
         }
         val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         header.addView(Ui.chip(this, "‹ 返回", false) { finish() })
         header.addView(Ui.text(this, "设置", 28f), LinearLayout.LayoutParams(0, Ui.dp(this, 56), 1f))
         root.addView(header)
-        val columns = LinearLayout(this)
-        val nav = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val compact = Ui.isCompactWidth(this)
+        val columns = LinearLayout(this).apply {
+            orientation = if (compact) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+        }
+        val nav = LinearLayout(this).apply {
+            orientation = if (compact) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+        }
         categories.forEach { (key, label) ->
             val button = Ui.chip(this, label, false) { selectSheet(key) }.apply {
                 id = View.generateViewId(); Ui.focusHighlight(this)
@@ -119,13 +129,30 @@ class SettingsActivity : AppCompatActivity() {
                 }
             }
             categoryButtons[key] = button
-            nav.addView(button, LinearLayout.LayoutParams(-1, Ui.dp(this, 50)).apply { bottomMargin = Ui.dp(this@SettingsActivity, 8) })
+            nav.addView(button, LinearLayout.LayoutParams(
+                if (compact) -2 else -1,
+                Ui.dp(this, if (compact) 42 else 50),
+            ).apply {
+                if (compact) marginEnd = Ui.dp(this@SettingsActivity, 6)
+                else bottomMargin = Ui.dp(this@SettingsActivity, 8)
+            })
         }
-        columns.addView(NestedScrollView(this).apply { addView(nav) }, LinearLayout.LayoutParams(Ui.dp(this, 155), -1))
+        if (compact) {
+            columns.addView(HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled = false
+                addView(nav)
+            }, LinearLayout.LayoutParams(-1, Ui.dp(this, 50)))
+        } else {
+            columns.addView(NestedScrollView(this).apply { addView(nav) }, LinearLayout.LayoutParams(Ui.dp(this, 155), -1))
+        }
         sheetHost = android.widget.FrameLayout(this).apply {
-            background = Ui.roundedBackground(Ui.surface, Ui.dp(context, 18))
+            background = Ui.floatingPanel(context)
         }
-        columns.addView(sheetHost, LinearLayout.LayoutParams(0, -1, 1f).apply { marginStart = Ui.dp(this@SettingsActivity, 16) })
+        columns.addView(sheetHost, if (compact) {
+            LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = Ui.dp(this@SettingsActivity, 8) }
+        } else {
+            LinearLayout.LayoutParams(0, -1, 1f).apply { marginStart = Ui.dp(this@SettingsActivity, 16) }
+        })
         root.addView(columns, LinearLayout.LayoutParams(-1, 0, 1f))
         val requested = intent.getStringExtra("section")
         selectSheet(when {
@@ -207,10 +234,10 @@ class SettingsActivity : AppCompatActivity() {
                         settings = settings.copy(routePolicy = it); saveAndRefresh()
                     }
                     content.addView(Ui.text(this, "自动切换只处理连接、超时和 HTTP 线路错误；解码器、HDR 和会员权限错误不会误切 CDN。测速仅在你主动触发时执行。", 13f, Ui.muted))
-                    content.addView(Ui.button(this, "打开网络诊断") {
+                    content.addView(Ui.secondaryButton(this, "打开网络诊断") {
                         startActivity(android.content.Intent(this, NetworkDiagnosticsActivity::class.java))
                     })
-                    content.addView(Ui.button(this, "清除线路诊断结果") {
+                    content.addView(Ui.secondaryButton(this, "清除线路诊断结果") {
                         com.lvsaber.bilitv.data.PlaybackDiagnosticsStore.clearProbes()
                         android.widget.Toast.makeText(this, "线路诊断结果已清除", android.widget.Toast.LENGTH_SHORT).show()
                     })
@@ -239,17 +266,47 @@ class SettingsActivity : AppCompatActivity() {
                     }
                     content.addView(Ui.text(this, "设置自动保存；返回播放器即时生效，不重启视频。仅调整滚动弹幕，不支持智能防遮挡。", 14f, Ui.muted))
                 }
+                "live" -> {
+                    val qualityOptions = listOf(
+                        DisplayOption(0, "自动 · 直播间最高可用"),
+                        DisplayOption(30_000, "杜比"),
+                        DisplayOption(20_000, "4K"),
+                        DisplayOption(10_000, "原画"),
+                        DisplayOption(400, "蓝光"),
+                        DisplayOption(250, "超清"),
+                        DisplayOption(150, "高清"),
+                        DisplayOption(80, "流畅"),
+                    )
+                    val savedQuality = qualityOptions.firstOrNull { it.value == settings.liveQualityId }
+                        ?: qualityOptions.first()
+                    addChoiceRow("默认直播画质", "播放器只显示该房间接口实际返回的档位；当前不可用时回到自动。", qualityOptions, savedQuality) {
+                        settings = settings.copy(liveQualityId = it.value); saveAndRefresh()
+                    }
+                    addChoiceRow("默认直播编码", "自动优先 H.264；设备能力不支持时不请求该编码。", LiveCodecPreference.entries.toList(), settings.liveCodecPreference) {
+                        settings = settings.copy(liveCodecPreference = it); saveAndRefresh()
+                    }
+                    addChoiceRow("默认直播协议", "自动优先 HLS；仅使用接口返回且播放器支持的协议。", LiveProtocolPreference.entries.toList(), settings.liveProtocolPreference) {
+                        settings = settings.copy(liveProtocolPreference = it); saveAndRefresh()
+                    }
+                    addBooleanRow("播放故障自动恢复", settings.liveAutoRecoveryEnabled) {
+                        settings = settings.copy(liveAutoRecoveryEnabled = it); saveAndRefresh()
+                    }
+                    addBooleanRow("进入直播默认显示弹幕", settings.liveDanmakuEnabled) {
+                        settings = settings.copy(liveDanmakuEnabled = it); saveAndRefresh()
+                    }
+                    content.addView(Ui.text(this, "自动恢复只响应明确的起播/网络错误，最多尝试两次备线路或自动模式下的 HLS→FLV；不因短暂缓冲切线，不降低画质或更换编码。弹幕沿用“弹幕”页的区域、速度、字号、透明度和密度设置。", 14f, Ui.muted))
+                }
                 "account" -> {
                     content.addView(Ui.text(this, "账号进度独立保存，退出登录后使用访客记录。清理封面缓存保留观看进度和设置。", 14f, Ui.muted))
-                    content.addView(Ui.button(this, "二维码登录") { startActivity(android.content.Intent(this, LoginActivity::class.java)) })
-                    content.addView(Ui.button(this, "退出登录") {
+                    content.addView(Ui.secondaryButton(this, "二维码登录") { startActivity(android.content.Intent(this, LoginActivity::class.java)) })
+                    content.addView(Ui.secondaryButton(this, "退出登录") {
                         confirm("退出当前账号？") {
                             com.lvsaber.bilitv.data.BiliApiClient(this).clearSession()
                             com.lvsaber.bilitv.data.ProgressRepository.get(this).refreshAccount()
                             android.widget.Toast.makeText(this, "已退出登录", android.widget.Toast.LENGTH_SHORT).show()
                         }
                     })
-                    content.addView(Ui.button(this, "清理封面缓存") {
+                    content.addView(Ui.secondaryButton(this, "清理封面缓存") {
                         confirm("清理已缓存的封面图片？") {
                             android.widget.Toast.makeText(this, "正在清理封面缓存…", android.widget.Toast.LENGTH_SHORT).show()
                             CoverLoader.clear(this) { success ->
@@ -264,7 +321,7 @@ class SettingsActivity : AppCompatActivity() {
                     content.addView(Ui.text(this, "悬浮导航 · 历史回看 · 全局续播\n观看进度保存在本机；登录后按需读取云端历史。", 15f, Ui.muted))
                 }
             }
-            if (key in setOf("appearance", "browse", "playback", "network", "danmaku")) content.addView(Ui.chip(this, "恢复本页默认设置", false) {
+            if (key in setOf("appearance", "browse", "playback", "network", "danmaku", "live")) content.addView(Ui.chip(this, "恢复本页默认设置", false) {
                 confirm("恢复${categories[key]}的默认设置？") {
                     val defaults = AppSettings()
                     settings = when (key) {
@@ -272,6 +329,9 @@ class SettingsActivity : AppCompatActivity() {
                         "browse" -> settings.copy(railPrefetchEnabled = defaults.railPrefetchEnabled)
                         "network" -> settings.copy(autoRouteSwitchEnabled = defaults.autoRouteSwitchEnabled, routePolicy = defaults.routePolicy)
                         "danmaku" -> settings.copy(danmakuEnabled = defaults.danmakuEnabled, danmaku = defaults.danmaku)
+                        "live" -> settings.copy(liveQualityId = defaults.liveQualityId, liveCodecPreference = defaults.liveCodecPreference,
+                            liveProtocolPreference = defaults.liveProtocolPreference, liveAutoRecoveryEnabled = defaults.liveAutoRecoveryEnabled,
+                            liveDanmakuEnabled = defaults.liveDanmakuEnabled)
                         else -> settings.copy(defaultQuality = defaults.defaultQuality, videoFormat = defaults.videoFormat, videoCodec = defaults.videoCodec,
                             videoResizeMode = defaults.videoResizeMode, subtitleTextScale = defaults.subtitleTextScale)
                     }
@@ -287,7 +347,7 @@ class SettingsActivity : AppCompatActivity() {
             targetTag?.let { tag -> scroll.post { content.findViewWithTag<View>(tag)?.let { scroll.scrollTo(0, it.top) } } }
         }
         categoryButtons.forEach { (category, button) ->
-            button.background = Ui.roundedBackground(if (category == key) Ui.blue else Ui.surfaceRaised, Ui.dp(this, 12))
+            Ui.setChipSelected(button, category == key)
         }
     }
 
@@ -539,6 +599,8 @@ class SettingsActivity : AppCompatActivity() {
         is AppSettings.VideoFormat -> value.label
         is AppSettings.VideoCodec -> value.label
         is AppSettings.RoutePolicy -> value.label
+        is LiveCodecPreference -> value.label
+        is LiveProtocolPreference -> value.label
         is QualityOption -> value.label
         is DisplayOption<*> -> value.label
         is com.lvsaber.bilitv.data.ChannelDefinition -> value.title

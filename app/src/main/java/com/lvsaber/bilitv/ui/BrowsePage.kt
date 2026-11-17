@@ -5,7 +5,9 @@ import android.content.Intent
 import android.os.SystemClock
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -28,6 +30,7 @@ import com.lvsaber.bilitv.data.ChannelDefinition
 import com.lvsaber.bilitv.data.RailBuffer
 import com.lvsaber.bilitv.data.VideoSummary
 import java.util.concurrent.RejectedExecutionException
+import kotlin.math.abs
 
 private data class RailLoadResult(
     val videos: List<VideoSummary>,
@@ -36,6 +39,139 @@ private data class RailLoadResult(
     val successfulPages: Int,
     val error: Throwable? = null,
 )
+
+internal enum class RailEdgeGesture {
+    REFRESH,
+}
+
+internal fun railEdgeGestureOnSwipe(
+    startedAtLeadingEdge: Boolean,
+    startX: Float,
+    deltaX: Float,
+    deltaY: Float,
+    touchSlop: Float,
+    safeStartInset: Float,
+    refreshZoneEnd: Float,
+    refreshDistance: Float,
+): RailEdgeGesture? {
+    if (!startedAtLeadingEdge || startX < safeStartInset || startX > refreshZoneEnd) return null
+    if (deltaX >= -refreshDistance || abs(deltaX) <= touchSlop || abs(deltaX) <= abs(deltaY)) return null
+    return RailEdgeGesture.REFRESH
+}
+
+private class RailEdgeGestureRecyclerView(
+    context: Context,
+    private val refreshEnabled: Boolean,
+    private val onEdgeGesture: (RailEdgeGesture) -> Unit,
+) : RecyclerView(context) {
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
+    private val safeStartInset = Ui.dp(context, 48).toFloat()
+    private val refreshZoneEnd = Ui.dp(context, 160).toFloat()
+    private val refreshDistance = Ui.dp(context, 72).toFloat()
+    private var downX = 0f
+    private var downY = 0f
+    private var startedAtLeadingEdge = false
+    private var refreshSwipeCaptured = false
+
+    override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
+        if (!refreshEnabled) return super.onInterceptTouchEvent(event)
+
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                downX = event.x
+                downY = event.y
+                startedAtLeadingEdge = !canScrollHorizontally(-1)
+                refreshSwipeCaptured = false
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val gesture = railEdgeGestureOnSwipe(
+                    startedAtLeadingEdge,
+                    downX,
+                    event.x - downX,
+                    event.y - downY,
+                    touchSlop,
+                    safeStartInset,
+                    refreshZoneEnd,
+                    refreshDistance,
+                )
+                if (gesture == RailEdgeGesture.REFRESH) {
+                    refreshSwipeCaptured = true
+                    stopScroll()
+                    return true
+                }
+            }
+            MotionEvent.ACTION_UP -> {
+                val gesture = railEdgeGestureOnSwipe(
+                    startedAtLeadingEdge,
+                    downX,
+                    event.x - downX,
+                    event.y - downY,
+                    touchSlop,
+                    safeStartInset,
+                    refreshZoneEnd,
+                    refreshDistance,
+                )
+                if (gesture == RailEdgeGesture.REFRESH) {
+                    refreshSwipeCaptured = true
+                    return true
+                }
+                val intercepted = super.onInterceptTouchEvent(event)
+                resetGesture()
+                return intercepted
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                val intercepted = super.onInterceptTouchEvent(event)
+                resetGesture()
+                return intercepted
+            }
+        }
+        return super.onInterceptTouchEvent(event)
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (refreshEnabled && !refreshSwipeCaptured &&
+            (event.actionMasked == MotionEvent.ACTION_MOVE || event.actionMasked == MotionEvent.ACTION_UP)
+        ) {
+            val gesture = railEdgeGestureOnSwipe(
+                startedAtLeadingEdge,
+                downX,
+                event.x - downX,
+                event.y - downY,
+                touchSlop,
+                safeStartInset,
+                refreshZoneEnd,
+                refreshDistance,
+            )
+            if (gesture == RailEdgeGesture.REFRESH) {
+                refreshSwipeCaptured = true
+                stopScroll()
+            }
+        }
+        if (!refreshSwipeCaptured) return super.onTouchEvent(event)
+        when (event.actionMasked) {
+            MotionEvent.ACTION_UP -> {
+                resetGesture()
+                // Keep the Android system-back region untouched. The deliberate refresh
+                // gesture starts inside the rail and is dispatched after touch handling.
+                post { onEdgeGesture(RailEdgeGesture.REFRESH) }
+            }
+            MotionEvent.ACTION_CANCEL -> resetGesture()
+        }
+        return true
+    }
+
+    private fun resetGesture() {
+        startedAtLeadingEdge = false
+        refreshSwipeCaptured = false
+    }
+}
+
+internal fun shouldAppendRailAtScrollEnd(
+    userScrolled: Boolean,
+    active: Boolean,
+    reachedEnd: Boolean,
+    itemCount: Int,
+): Boolean = userScrolled && active && reachedEnd && itemCount > 0
 
 /** A page keeps its data and scroll state while switching channels. */
 @UnstableApi
@@ -53,7 +189,11 @@ class BrowsePage(
         val items = mutableListOf<VideoSummary>()
         val status = Ui.text(context, "等待加载", 12f, Ui.muted)
         val retry = Ui.chip(context, "重试", false) { fetch(this, demand = true, reset = failedReset) }
-        val list = RecyclerView(context)
+        val list = RailEdgeGestureRecyclerView(context, refreshEnabled = !grid) { gesture ->
+            when (gesture) {
+                RailEdgeGesture.REFRESH -> refresh(this)
+            }
+        }
         var focusIndex = 0
         var started = false
         var loading = false
@@ -87,6 +227,7 @@ class BrowsePage(
     private var verticalPosition = 0
     private var lastFocusedRail: Rail? = null
     private val grid = channel == null && settings.homeStyle == AppSettings.HomeStyle.GRID
+    private val showHero = channel == null && settings.heroEnabled && !grid
     private val cardWidth get() = Ui.railCardWidth(context, width.takeIf { it > 0 }
         ?: (resources.displayMetrics.widthPixels - Ui.dp(context, 40)))
 
@@ -95,7 +236,7 @@ class BrowsePage(
         if (w != oldw && w > 0 && !grid) post {
             rails.forEach { rail ->
                 rail.list.layoutParams = (rail.list.layoutParams as LayoutParams).apply {
-                    height = Ui.cardHeight(context, cardWidth) + Ui.dp(context, 12)
+                    height = Ui.cardHeight(context, cardWidth) + Ui.dp(context, 8)
                 }
                 rail.adapter.notifyDataSetChanged()
             }
@@ -106,7 +247,7 @@ class BrowsePage(
         orientation = VERTICAL
         val definitions = if (grid) listOf(BrowseRail("featured", "热门精选", BrowseSource.POPULAR))
             else channel?.let { ChannelCatalog.rails(it, settings) } ?: ChannelCatalog.homeRails(settings)
-        if (channel == null && settings.heroEnabled && !grid && definitions.isNotEmpty()) {
+        if (showHero && definitions.isNotEmpty()) {
             heroHost.addView(Ui.text(context, "正在准备本期推荐…", 20f))
             body.addView(heroHost, LayoutParams(-1, Ui.dp(context, 40)).apply { bottomMargin = Ui.dp(context, 4) })
         }
@@ -191,7 +332,7 @@ class BrowsePage(
             itemAnimator = null
             isNestedScrollingEnabled = !grid
             clipToPadding = false
-            setPadding(Ui.dp(context, 5), Ui.dp(context, 4), Ui.dp(context, 8), Ui.dp(context, 4))
+            setPadding(Ui.dp(context, 5), Ui.dp(context, 2), Ui.dp(context, 8), Ui.dp(context, 2))
             descendantFocusability = FOCUS_AFTER_DESCENDANTS
             isFocusable = false
             setItemViewCacheSize(2)
@@ -199,9 +340,18 @@ class BrowsePage(
                 override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
                     if (newState == RecyclerView.SCROLL_STATE_DRAGGING) rail.userScrolled = true
                     if (newState == RecyclerView.SCROLL_STATE_IDLE && rail.userScrolled) {
+                        val wasUserScrolled = rail.userScrolled
                         rail.userScrolled = false
-                        val atEnd = if (grid) !canScrollVertically(1) else !canScrollHorizontally(1)
-                        if (active && atEnd && rail.items.isNotEmpty()) append(rail, focusNew = false)
+                        val reachedEnd = if (grid) !canScrollVertically(1) else !canScrollHorizontally(1)
+                        if (shouldAppendRailAtScrollEnd(
+                                userScrolled = wasUserScrolled,
+                                active = active,
+                                reachedEnd = reachedEnd,
+                                itemCount = rail.items.size,
+                            )
+                        ) {
+                            append(rail, focusNew = false)
+                        }
                     }
                 }
                 override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
@@ -212,7 +362,7 @@ class BrowsePage(
                 }
             })
         }
-        body.addView(rail.list, LayoutParams(-1, if (grid) Ui.dp(context, 620) else Ui.cardHeight(context, cardWidth) + Ui.dp(context, 12)).apply { bottomMargin = Ui.dp(context, 4) })
+        body.addView(rail.list, LayoutParams(-1, if (grid) Ui.dp(context, 620) else Ui.cardHeight(context, cardWidth) + Ui.dp(context, 8)).apply { bottomMargin = Ui.dp(context, 2) })
         // Empty and failed rails still have a D-pad landing point.
         rail.status.isFocusable = true
         Ui.focusHighlight(rail.status)
@@ -251,9 +401,13 @@ class BrowsePage(
             rail.status.isFocusable = false
             if (active && (focusNew || rail.focusWhenReady)) {
                 rail.focusWhenReady = false
-                focusCard(rail, if (focusNew) oldSize else rail.focusIndex)
+                focusCard(
+                    rail,
+                    if (focusNew) oldSize else rail.focusIndex,
+                    smoothToAppendedCard = focusNew && oldSize > 0,
+                )
             }
-            if (channel == null && settings.heroEnabled && !grid && oldSize == 0 && rail === rails.firstOrNull()) addHero(newItems.first())
+            if (showHero && oldSize == 0 && rail === rails.firstOrNull()) addHero(newItems.first())
         }
         status(rail)
     }
@@ -346,7 +500,7 @@ class BrowsePage(
                         rail.focusWhenReady = active && !rail.focusAfterRefresh &&
                             (focusRail === rail || lastFocusedRail === rail)
                         rail.prefetchAt = -1
-                        if (channel == null && settings.heroEnabled && !grid && rail === rails.firstOrNull() && refreshed.isNotEmpty()) {
+                        if (showHero && rail === rails.firstOrNull() && refreshed.isNotEmpty()) {
                             addHero(refreshed.first())
                         }
                     } else {
@@ -430,7 +584,10 @@ class BrowsePage(
         scroll.post {
             if (!active || disposed) return@post
             scroll.scrollTo(0, scrollY)
-            if (rail.items.isNotEmpty()) focusCard(rail, position, force = true)
+            if (rail.items.isNotEmpty()) {
+                (rail.list.layoutManager as? LinearLayoutManager)?.scrollToPositionWithOffset(position, 0)
+                focusCard(rail, position, force = true)
+            }
             else {
                 status(rail)
                 if (rail.status.isFocusable) rail.status.requestFocus()
@@ -487,20 +644,27 @@ class BrowsePage(
         }
     }
 
-    private fun focusCard(rail: Rail, index: Int, force: Boolean = false) {
+    private fun focusCard(
+        rail: Rail,
+        index: Int,
+        force: Boolean = false,
+        smoothToAppendedCard: Boolean = false,
+    ) {
         if (!active || rail.items.isEmpty()) return
         focusRail = rail
         lastFocusedRail = rail
         val position = index.coerceIn(0, rail.items.lastIndex)
         rail.focusIndex = position
         if (rail.list.findViewHolderForAdapterPosition(position) == null) {
-            (rail.list.layoutManager as LinearLayoutManager).scrollToPositionWithOffset(position, 0)
+            if (smoothToAppendedCard) rail.list.smoothScrollToPosition(position)
+            else (rail.list.layoutManager as LinearLayoutManager).scrollToPositionWithOffset(position, 0)
         }
         fun request(attempt: Int) {
             if (!active || !force && focusRail !== rail) return
             val card = rail.list.findViewHolderForAdapterPosition(position)?.itemView
-            if (card != null) card.requestFocus()
-            else if (attempt < 4) rail.list.postOnAnimation { request(attempt + 1) }
+            if (card?.requestFocus() == true) return
+            val maxAttempts = if (smoothToAppendedCard) 90 else 4
+            if (attempt < maxAttempts) rail.list.postOnAnimation { request(attempt + 1) }
         }
         rail.list.post { request(0) }
     }

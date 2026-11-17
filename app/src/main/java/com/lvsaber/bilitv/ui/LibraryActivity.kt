@@ -14,7 +14,7 @@ class LibraryActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setBackgroundColor(Ui.background)
+            orientation = LinearLayout.VERTICAL; background = Ui.pageBackground(context)
             setPadding(Ui.dp(context, 20), Ui.dp(context, 12), Ui.dp(context, 20), Ui.dp(context, 12))
         }
         root.addView(Ui.chip(this, "‹ 返回", false) { if (!page.backToFolders()) finish() })

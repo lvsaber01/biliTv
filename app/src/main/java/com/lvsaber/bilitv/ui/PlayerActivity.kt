@@ -1,5 +1,6 @@
 package com.lvsaber.bilitv.ui
 
+import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -37,6 +38,11 @@ import com.lvsaber.bilitv.data.SubtitleTrack
 import com.lvsaber.bilitv.data.ProgressRepository
 import com.lvsaber.bilitv.data.WatchProgress
 import com.lvsaber.bilitv.data.VideoSummary
+import com.lvsaber.bilitv.data.PgcCategory
+import com.lvsaber.bilitv.data.PgcEpisode
+import com.lvsaber.bilitv.data.PgcPlayableRef
+import com.lvsaber.bilitv.data.PgcProgress
+import com.lvsaber.bilitv.data.PgcSeasonDetail
 import androidx.media3.datasource.HttpDataSource
 import java.net.ConnectException
 import java.net.SocketTimeoutException
@@ -45,10 +51,12 @@ import java.util.concurrent.atomic.AtomicReference
 
 @UnstableApi
 class PlayerActivity : AppCompatActivity() {
+    private lateinit var pageRoot: FrameLayout
     private lateinit var playerView: PlayerView
     private lateinit var danmakuOverlay: DanmakuOverlay
     private lateinit var subtitleOverlay: SubtitleOverlay
     private lateinit var danmakuButton: android.widget.Button
+    private lateinit var quickQualityButton: android.widget.Button
     private var danmakuState = "加载中"
     private var danmakuLoading = false
     private lateinit var api: BiliApiClient
@@ -61,11 +69,21 @@ class PlayerActivity : AppCompatActivity() {
     private var routeButton: android.widget.Button? = null
     private var codecFallbackButton: android.widget.Button? = null
     private lateinit var actionRail: LinearLayout
+    private var chapterButton: android.widget.Button? = null
+    private var speedButton: android.widget.Button? = null
+    private var pgcNextEpisodeButton: android.widget.Button? = null
+    private var pgcEpisodeButton: android.widget.Button? = null
+    private var pgcPicker: PgcEpisodePickerView? = null
     private lateinit var controls: PlaybackControls
     private lateinit var deviceCapabilities: PlaybackDeviceCapabilities
     private var currentBvid = ""
     private var currentCid = 0L
     private var currentTitle = ""
+    private var currentPgc: PgcPlayableRef? = null
+    private var currentPgcDetail: PgcSeasonDetail? = null
+    private var pendingPlaybackState: Boolean? = null
+    private var pickerWasPlaying = false
+    private var pgcContextGeneration = 0
     private var currentSource: PlaySource? = null
     private var resumePosition = 0L
     private var sourceReady = false
@@ -74,6 +92,8 @@ class PlayerActivity : AppCompatActivity() {
     private var playbackAccount = "guest"
     private var playerInfo = PlayerInfo()
     private var subtitleLoading = false
+    private var subtitleRequestGeneration = 0
+    private var danmakuRequestGeneration = 0
     private var resumeOnForeground = true
     private var sourceRefreshAttempted = false
     private val routeRecoveryAttempted = linkedSetOf<String>()
@@ -88,7 +108,12 @@ class PlayerActivity : AppCompatActivity() {
     private val danmakuTicker = object : Runnable {
         override fun run() {
             if (!isFinishing && !isDestroyed && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
-                if (::danmakuOverlay.isInitialized) danmakuOverlay.positionMs = player?.currentPosition ?: 0L
+                if (::danmakuOverlay.isInitialized) {
+                    // ExoPlayer reports 0/old-item positions while the new media
+                    // item is preparing. Keep danmaku on the requested resume
+                    // position until the new source is actually ready.
+                    danmakuOverlay.positionMs = if (sourceReady) player?.currentPosition ?: resumePosition else resumePosition
+                }
                 tickerHandler.postDelayed(this, 16L)
             }
         }
@@ -107,30 +132,48 @@ class PlayerActivity : AppCompatActivity() {
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         api = BiliApiClient(this)
         deviceCapabilities = PlaybackDeviceCapabilities.detect(this)
-        val bvid = intent.getStringExtra(EXTRA_BVID).orEmpty()
-        val cid = intent.getLongExtra(EXTRA_CID, 0L)
-        val title = intent.getStringExtra(EXTRA_TITLE).orEmpty()
+        val restored = savedInstanceState
+        val bvid = restored?.getString(STATE_BVID) ?: intent.getStringExtra(EXTRA_BVID).orEmpty()
+        val cid = restored?.getLong(STATE_CID, intent.getLongExtra(EXTRA_CID, 0L)) ?: intent.getLongExtra(EXTRA_CID, 0L)
+        val title = restored?.getString(STATE_TITLE) ?: intent.getStringExtra(EXTRA_TITLE).orEmpty()
         currentBvid = bvid
         currentCid = cid
         currentTitle = title
-        resumePosition = savedInstanceState?.getLong("position") ?: intent.getLongExtra("start_ms", 0)
-        playbackAccount = intent.getStringExtra("account") ?: ProgressRepository.get(this).account
-        setContentView(buildPage(title))
+        val pgcSeasonId = restored?.getLong(STATE_PGC_SEASON_ID, intent.getLongExtra(EXTRA_PGC_SEASON_ID, 0L))
+            ?: intent.getLongExtra(EXTRA_PGC_SEASON_ID, 0L)
+        val pgcEpisodeId = restored?.getLong(STATE_PGC_EPISODE_ID, intent.getLongExtra(EXTRA_PGC_EPISODE_ID, 0L))
+            ?: intent.getLongExtra(EXTRA_PGC_EPISODE_ID, 0L)
+        val pgcAreas = restored?.getStringArrayList(STATE_PGC_AREAS) ?: intent.getStringArrayListExtra(EXTRA_PGC_AREAS).orEmpty()
+        currentPgc = if (pgcSeasonId > 0 && pgcEpisodeId > 0 && cid > 0) {
+            PgcPlayableRef(pgcSeasonId, pgcEpisodeId, cid,
+                restored?.getLong(STATE_PGC_AID, intent.getLongExtra(EXTRA_PGC_AID, 0L)) ?: intent.getLongExtra(EXTRA_PGC_AID, 0L), bvid,
+                restored?.getString(STATE_PGC_SEASON_TITLE) ?: intent.getStringExtra(EXTRA_PGC_SEASON_TITLE).orEmpty(),
+                restored?.getString(STATE_PGC_EPISODE_TITLE) ?: intent.getStringExtra(EXTRA_PGC_EPISODE_TITLE).orEmpty(),
+                restored?.getString(STATE_COVER) ?: intent.getStringExtra("cover").orEmpty(),
+                PgcCategory.fromSeasonType(restored?.getInt(STATE_PGC_CATEGORY, intent.getIntExtra(EXTRA_PGC_CATEGORY, 1))
+                    ?: intent.getIntExtra(EXTRA_PGC_CATEGORY, 1)) ?: PgcCategory.JAPANESE_ANIME, pgcAreas)
+        } else null
+        resumePosition = restored?.getLong(STATE_POSITION) ?: intent.getLongExtra("start_ms", 0)
+        playbackAccount = restored?.getString(STATE_ACCOUNT) ?: intent.getStringExtra("account") ?: ProgressRepository.get(this).account
+        setContentView(buildPage(currentTitle))
         applyResizeMode()
         onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (errorView?.visibility == View.VISIBLE) finish()
+                if (pgcPicker != null) closePgcPicker(restorePlayback = true)
+                else if (errorView?.visibility == View.VISIBLE) finish()
+                else if (controls.morePanelVisible) controls.closeOptionsPanel()
                 else if (controls.controlsVisible) controls.hideControls() else finish()
             }
         })
         applyDanmakuSettings()
         updateDanmakuButton()
-        if (bvid.isBlank() || cid == 0L) {
+        if ((bvid.isBlank() && currentPgc == null) || cid == 0L) {
             showError("缺少播放参数")
         } else {
             loadSource(bvid, cid)
             loadDanmaku(cid)
-            loadPlayerInfo(bvid, cid)
+            loadPlayerInfoForCurrent()
+            if (currentPgc != null) loadPgcContext(currentPgc!!.seasonId, currentPgc!!.episodeId)
         }
     }
 
@@ -140,6 +183,7 @@ class PlayerActivity : AppCompatActivity() {
             isFocusable = true; isFocusableInTouchMode = true
             contentDescription = "视频画面"
         }
+        pageRoot = root
         playerView = PlayerView(this).apply {
             useController = false
             setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
@@ -149,26 +193,37 @@ class PlayerActivity : AppCompatActivity() {
             setOnClickListener { controls.toggleVisibility() }
         }
         root.addView(playerView, FrameLayout.LayoutParams(-1, -1))
-        playerView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            updateDanmakuViewport()
-        }
         danmakuOverlay = DanmakuOverlay(this)
+        danmakuOverlay.positionMs = resumePosition
         root.addView(danmakuOverlay, FrameLayout.LayoutParams(-1, -1))
         subtitleOverlay = SubtitleOverlay(this)
         root.addView(subtitleOverlay, FrameLayout.LayoutParams(-1, -1))
         actionRail = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
-            setPadding(Ui.dp(context, 12), Ui.dp(context, 4), Ui.dp(context, 12), Ui.dp(context, 4))
-            setBackgroundColor(0x990B0E12.toInt())
+            clipChildren = false
         }
-        actionRail.addView(actionButton("画质") { showQualityChooser() })
-        actionRail.addView(actionButton("音轨") { showAudioChooser() })
-        actionRail.addView(actionButton("倍速") { showSpeedChooser() })
-        actionRail.addView(actionButton("字幕") { showSubtitleChooser() })
-        actionRail.addView(actionButton("章节") { showChapterChooser() })
-        actionRail.addView(actionButton("画面") { showResizeChooser() })
-        actionRail.addView(actionButton("线路") { showLineInfo() })
+        pgcNextEpisodeButton = actionButton("下一集") {
+            val current = currentPgc
+            if (current == null) return@actionButton
+            if (currentPgcDetail?.season?.seasonId != current.seasonId) {
+                Toast.makeText(this, "正在加载番剧集数，请稍后再试", Toast.LENGTH_SHORT).show()
+            } else if (!playNextPgcEpisode()) {
+                Toast.makeText(this, "本季已是最后一集，可打开选集选择其他季", Toast.LENGTH_LONG).show()
+            }
+        }.also {
+            it.tag = "playback-next-episode"
+            it.contentDescription = "播放下一集"
+            it.visibility = if (currentPgc == null) View.GONE else View.VISIBLE
+        }
+        actionRail.addView(pgcNextEpisodeButton)
+        pgcEpisodeButton = actionButton("选集") { showPgcEpisodePicker() }.also {
+            it.tag = "playback-episodes"
+            it.visibility = if (currentPgc == null) View.GONE else View.VISIBLE
+        }
+        actionRail.addView(pgcEpisodeButton)
+        quickQualityButton = actionButton("画质") { showQualityChooser() }.apply { tag = "playback-quality" }
+        actionRail.addView(quickQualityButton)
         danmakuButton = actionButton("弹幕 · 加载中") {
             if (danmakuState == "失败" && danmakuOverlay.overlayEnabled) {
                 loadDanmaku(currentCid)
@@ -178,14 +233,50 @@ class PlayerActivity : AppCompatActivity() {
             AppSettings.load(this).copy(danmakuEnabled = danmakuOverlay.overlayEnabled).save(this)
             updateDanmakuButton()
             Toast.makeText(this, if (danmakuOverlay.overlayEnabled) "弹幕已开启" else "弹幕已关闭", Toast.LENGTH_SHORT).show()
-        }
+        }.apply { tag = "playback-danmaku" }
         actionRail.addView(danmakuButton)
-        actionRail.addView(actionButton("弹幕设置") {
+        speedButton = actionButton("速度 1.0×") { showSpeedChooser() }.apply { tag = "playback-speed" }
+        speedButton?.let(actionRail::addView)
+        actionRail.addView(actionButton("音轨") { showAudioChooser() }.apply { tag = "playback-audio" })
+        actionRail.addView(actionButton("字幕") { showSubtitleChooser() }.apply { tag = "playback-subtitle" })
+        chapterButton = actionButton("章节") { showChapterChooser() }.apply {
+            tag = "playback-chapters"
+            visibility = if (playerInfo.chapters.isEmpty()) View.GONE else View.VISIBLE
+        }
+        chapterButton?.let(actionRail::addView)
+
+        val moreActions = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            tag = "playback-more-actions"
+        }
+        fun addMoreAction(label: String, action: () -> Unit, tag: String? = null): android.widget.Button {
+            val button = actionButton(label, action).apply {
+                this.tag = tag
+                setTextColor(Ui.text)
+                background = Ui.roundedBackground(Ui.surfaceRaised, Ui.dp(this@PlayerActivity, 10))
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(Ui.dp(context, 15), 0, Ui.dp(context, 12), 0)
+                id = View.generateViewId()
+            }
+            moreActions.addView(button, LinearLayout.LayoutParams(-1, Ui.dp(this, 44)).apply {
+                bottomMargin = Ui.dp(this@PlayerActivity, 7)
+            })
+            return button
+        }
+        addMoreAction("画面比例", { showResizeChooser() }, "playback-resize")
+        addMoreAction("弹幕详细设置", {
             startActivity(android.content.Intent(this, SettingsActivity::class.java).putExtra("section", "danmaku"))
-        })
-        actionRail.addView(actionButton("设置") {
+        }, "playback-danmaku-settings")
+        addMoreAction("播放线路", { showLineInfo() }, "playback-routes")
+        addMoreAction("网络诊断", { startActivity(android.content.Intent(this, NetworkDiagnosticsActivity::class.java)) }, "playback-network")
+        addMoreAction("应用设置", {
             startActivity(android.content.Intent(this, SettingsActivity::class.java).putExtra("section", "playback"))
-        })
+        }, "playback-settings")
+        val moreButton = actionButton("更多") { controls.toggleOptionsPanel() }.apply {
+            tag = "playback-more-toggle"
+            contentDescription = "更多播放设置"
+        }
+        actionRail.addView(moreButton)
         controls = PlaybackControls(this, title, actionRail,
             togglePlayback = {
                 player?.let { exo ->
@@ -195,34 +286,27 @@ class PlayerActivity : AppCompatActivity() {
                 updatePlaybackUi()
             },
             seekPlayback = { target -> player?.seekTo(target); updatePlaybackUi() },
-            focusVideo = { root.requestFocus() })
+            focusVideo = { root.requestFocus() },
+            moreActions = moreActions)
         root.addView(controls, FrameLayout.LayoutParams(-1, -1))
         root.post { if (errorView?.visibility != View.VISIBLE && !isDestroyed) controls.showControls() }
-        root.post { updateDanmakuViewport() }
         return root
     }
 
-    private fun updateDanmakuViewport() {
-        if (!::danmakuOverlay.isInitialized || !::playerView.isInitialized) return
-        val surface = playerView.videoSurfaceView
-        if (surface == null || surface.width <= 0 || surface.height <= 0) {
-            danmakuOverlay.setVideoBounds(null)
-            return
-        }
-        val overlayLocation = IntArray(2)
-        val surfaceLocation = IntArray(2)
-        danmakuOverlay.getLocationOnScreen(overlayLocation)
-        surface.getLocationOnScreen(surfaceLocation)
-        danmakuOverlay.setVideoBounds(android.graphics.RectF(
-            (surfaceLocation[0] - overlayLocation[0]).toFloat(),
-            (surfaceLocation[1] - overlayLocation[1]).toFloat(),
-            (surfaceLocation[0] - overlayLocation[0] + surface.width).toFloat(),
-            (surfaceLocation[1] - overlayLocation[1] + surface.height).toFloat(),
-        ))
-    }
-
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
-        if (::controls.isInitialized && errorView?.visibility != View.VISIBLE && controls.handleKey(event, currentFocus)) return true
+        if (pgcPicker != null && event.action == android.view.KeyEvent.ACTION_DOWN && event.keyCode in listOf(
+                android.view.KeyEvent.KEYCODE_DPAD_UP, android.view.KeyEvent.KEYCODE_DPAD_DOWN,
+                android.view.KeyEvent.KEYCODE_DPAD_LEFT, android.view.KeyEvent.KEYCODE_DPAD_RIGHT,
+                android.view.KeyEvent.KEYCODE_DPAD_CENTER, android.view.KeyEvent.KEYCODE_ENTER,
+            )) {
+            val picker = pgcPicker ?: return true
+            val focused = currentFocus
+            if (focused == null || !isDescendantOf(focused, picker)) {
+                picker.focusInitial()
+                return true
+            }
+        }
+        if (pgcPicker == null && ::controls.isInitialized && errorView?.visibility != View.VISIBLE && controls.handleKey(event, currentFocus)) return true
         return super.dispatchKeyEvent(event)
     }
 
@@ -243,7 +327,11 @@ class PlayerActivity : AppCompatActivity() {
         val generation = ++loadGeneration
         val accepted = AppExecutors.playback {
             val settings = AppSettings.load(this)
-            runCatching { api.getPlaySource(bvid, cid, settings, deviceCapabilities) }
+            val currentPgc = currentPgc
+            runCatching {
+                if (currentPgc != null) api.getPgcPlaySource(currentPgc, settings, deviceCapabilities)
+                else api.getPlaySource(bvid, cid, settings, deviceCapabilities)
+            }
                 .onSuccess { source -> runOnUiThread {
                     if (isDestroyed || generation != loadGeneration) return@runOnUiThread
                     currentSource = source
@@ -260,14 +348,122 @@ class PlayerActivity : AppCompatActivity() {
             val result = runCatching { api.getPlayerInfo(bvid, cid) }
             runOnUiThread {
                 if (isDestroyed) return@runOnUiThread
-                result.onSuccess { playerInfo = it }
+                result.onSuccess(::setPlayerInfo)
             }
         }
     }
 
+    private fun setPlayerInfo(info: PlayerInfo) {
+        playerInfo = info
+        chapterButton?.visibility = if (info.chapters.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    private fun loadPlayerInfoForCurrent() {
+        val pgc = currentPgc
+        playerInfo = PlayerInfo()
+        chapterButton?.visibility = View.GONE
+        subtitleOverlay.overlayEnabled = false
+        subtitleOverlay.submit(emptyList(), AppSettings.load(this).subtitleTextScale)
+        subtitleRequestGeneration++
+        subtitleLoading = false
+        if (pgc == null) loadPlayerInfo(currentBvid, currentCid)
+        else AppExecutors.io.execute {
+            val result = runCatching { api.getPgcPlayerInfo(pgc) }
+            runOnUiThread {
+                if (!isDestroyed && currentPgc?.episodeId == pgc.episodeId) result.onSuccess(::setPlayerInfo)
+            }
+        }
+    }
+
+    private fun loadPgcContext(seasonId: Long, episodeId: Long) {
+        val token = ++pgcContextGeneration
+        AppExecutors.io.execute {
+            val result = runCatching { api.getPgcSeasonDetail(seasonId) }
+            runOnUiThread {
+                if (isDestroyed || token != pgcContextGeneration || currentPgc?.seasonId != seasonId || currentPgc?.episodeId != episodeId) return@runOnUiThread
+                result.onSuccess { currentPgcDetail = it }
+            }
+        }
+    }
+
+    private fun showPgcEpisodePicker() {
+        val current = currentPgc ?: return
+        if (pgcPicker != null || errorView?.visibility == View.VISIBLE) return
+        pickerWasPlaying = player?.playWhenReady == true
+        player?.pause()
+        controls.beginDialog()
+        val picker = PgcEpisodePickerView(this, api, current,
+            onClose = { closePgcPicker(restorePlayback = true) },
+            onSelect = { playable -> selectPgcEpisode(playable, pickerWasPlaying) })
+        pgcPicker = picker
+        pageRoot.addView(picker, FrameLayout.LayoutParams(-1, -1))
+        pageRoot.requestLayout()
+        picker.bringToFront()
+        picker.requestFocus()
+        picker.focusInitial()
+    }
+
+    private fun closePgcPicker(restorePlayback: Boolean) {
+        val picker = pgcPicker ?: return
+        pgcPicker = null
+        picker.dispose()
+        pageRoot.removeView(picker)
+        controls.endDialog()
+        pgcEpisodeButton?.requestFocus()
+        if (restorePlayback && pickerWasPlaying) player?.play()
+    }
+
+    private fun selectPgcEpisode(playable: PgcPlayableRef, shouldPlay: Boolean) {
+        checkpoint()
+        pendingPlaybackState = shouldPlay
+        currentPgc = playable
+        currentBvid = playable.bvid
+        currentCid = playable.cid
+        currentTitle = playable.displayTitle
+        resumePosition = ProgressRepository.get(this).findPgc(playable.episodeId)?.takeIf { it.canResume }?.positionMs ?: 0L
+        danmakuOverlay.positionMs = resumePosition
+        sourceReady = false
+        currentSource = null
+        player?.pause()
+        controls.updateTitle(currentTitle)
+        pgcEpisodeButton?.visibility = View.VISIBLE
+        pgcNextEpisodeButton?.visibility = View.VISIBLE
+        closePgcPicker(restorePlayback = false)
+        danmakuRequestGeneration++
+        danmakuLoading = false
+        danmakuOverlay.submit(emptyList())
+        danmakuState = "加载中"
+        subtitleOverlay.submit(emptyList(), AppSettings.load(this).subtitleTextScale)
+        loadSource(currentBvid, currentCid)
+        loadDanmaku(currentCid)
+        loadPlayerInfoForCurrent()
+        loadPgcContext(playable.seasonId, playable.episodeId)
+    }
+
+    private fun playNextPgcEpisode(): Boolean {
+        val current = currentPgc ?: return false
+        val episodes = currentPgcDetail?.takeIf { it.season.seasonId == current.seasonId }?.episodes.orEmpty()
+        val index = episodes.indexOfFirst { it.episodeId == current.episodeId }
+        val next = episodes.getOrNull(index + 1) ?: return false
+        val season = currentPgcDetail?.season ?: return false
+        selectPgcEpisode(PgcPlayableRef(season.seasonId, next.episodeId, next.cid, next.aid, next.bvid,
+            season.title, next.displayTitle, next.coverUrl.ifBlank { season.coverUrl }, season.category, season.areas), shouldPlay = true)
+        return true
+    }
+
+    private fun isDescendantOf(view: View, ancestor: View): Boolean {
+        var node: View? = view
+        while (node != null) {
+            if (node === ancestor) return true
+            node = node.parent as? View
+        }
+        return false
+    }
+
     private fun startPlayer(source: PlaySource) {
         if (sourceReady) resumePosition = player?.currentPosition ?: resumePosition
-        val keepPlaying = player?.playWhenReady ?: resumeOnForeground
+        val keepPlaying = pendingPlaybackState ?: player?.playWhenReady ?: resumeOnForeground
+        pendingPlaybackState = null
         checkpoint()
         val settings = AppSettings.load(this)
         val restrictToSingleRoute = !settings.autoRouteSwitchEnabled || settings.routePolicy == AppSettings.RoutePolicy.PRIMARY_ONLY
@@ -277,6 +473,12 @@ class PlayerActivity : AppCompatActivity() {
             source.routeSet
         } ?: PlaybackRouteSet()
         val effectiveSource = source.copy(routeSet = activeRoutes)
+        if (::controls.isInitialized) {
+            val quality = source.videoTrack?.height?.takeIf { it > 0 }?.let { "${it}P" } ?: source.quality
+            val codec = source.videoTrack?.codecs?.let(::playerCodecLabel).orEmpty()
+            controls.updateStreamLabel(listOf(quality, codec).filter(String::isNotBlank).joinToString(" · ").ifBlank { "播放中" })
+            if (::quickQualityButton.isInitialized) quickQualityButton.text = "画质 · ${quality.ifBlank { "自动" }}"
+        }
         effectiveSource.routeSet.selectedRoute?.id?.let { routeRecoveryAttempted += it }
         val routeState = AtomicReference(activeRoutes)
         PlaybackDiagnosticsStore.setRouteSet(activeRoutes)
@@ -334,8 +536,9 @@ class PlayerActivity : AppCompatActivity() {
                 playerView.player = exoPlayer
                 exoPlayer.addListener(object : Player.Listener {
                     override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                        // DanmakuOverlay derives a stable fit viewport from its own window
+                        // size and this aspect ratio; do not follow transient SurfaceView bounds.
                         danmakuOverlay.videoAspectRatio = if (videoSize.height > 0) videoSize.width * videoSize.pixelWidthHeightRatio / videoSize.height else 0f
-                        playerView.post { updateDanmakuViewport() }
                     }
                     override fun onPlaybackStateChanged(playbackState: Int) {
                         if (lastPlaybackState != Player.STATE_BUFFERING && playbackState == Player.STATE_BUFFERING) {
@@ -362,7 +565,12 @@ class PlayerActivity : AppCompatActivity() {
                             if (recovering) controls.resumeControls()
                             if (exoPlayer.duration > 0 && exoPlayer.currentPosition >= exoPlayer.duration) exoPlayer.seekTo(0)
                         }
-                        if (playbackState == Player.STATE_ENDED) checkpoint(completed = true)
+                        if (playbackState == Player.STATE_ENDED) {
+                            if (!playNextPgcEpisode()) {
+                                checkpoint(completed = true)
+                                if (currentPgc != null) Toast.makeText(this@PlayerActivity, "本季已结束，可打开选集面板选择下一季", Toast.LENGTH_LONG).show()
+                            }
+                        }
                         updatePlaybackUi()
                     }
 
@@ -525,7 +733,10 @@ class PlayerActivity : AppCompatActivity() {
         val labels = options.map { "${it}x" }.toTypedArray()
         showControlDialog(androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("播放速度")
-            .setItems(labels) { _, which -> player?.setPlaybackSpeed(options[which]) }
+            .setItems(labels) { _, which ->
+                player?.setPlaybackSpeed(options[which])
+                speedButton?.text = "速度 ${options[which]}×"
+            }
             .create())
     }
 
@@ -556,13 +767,14 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun loadSubtitle(track: SubtitleTrack) {
         if (subtitleLoading) return
+        val token = ++subtitleRequestGeneration
         subtitleLoading = true
         Toast.makeText(this, "正在加载${subtitleLabel(track)}…", Toast.LENGTH_SHORT).show()
         AppExecutors.io.execute {
             val result = runCatching { api.getSubtitleCues(track.url) }
             runOnUiThread {
+                if (isDestroyed || token != subtitleRequestGeneration) return@runOnUiThread
                 subtitleLoading = false
-                if (isDestroyed) return@runOnUiThread
                 result.onSuccess { cues ->
                     subtitleOverlay.submit(cues, AppSettings.load(this).subtitleTextScale)
                     subtitleOverlay.overlayEnabled = cues.isNotEmpty()
@@ -685,15 +897,16 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun loadDanmaku(cid: Long) {
-        if (danmakuLoading) return
+        val token = ++danmakuRequestGeneration
         danmakuLoading = true; danmakuState = "加载中"; updateDanmakuButton()
         val accepted = AppExecutors.playback {
             val result = runCatching { DanmakuOverlay.parseXml(api.getDanmakuXml(cid)) }
             runOnUiThread {
-                if (isDestroyed || isFinishing) return@runOnUiThread
+                if (isDestroyed || isFinishing || token != danmakuRequestGeneration || cid != currentCid) return@runOnUiThread
                 danmakuLoading = false
                 result.onSuccess { items ->
-                    danmakuOverlay.submit(items)
+                    val timelinePosition = if (sourceReady) player?.currentPosition ?: resumePosition else resumePosition
+                    danmakuOverlay.submit(items, playbackPositionMs = timelinePosition)
                     danmakuState = if (items.isEmpty()) "暂无" else "开"
                 }.onFailure {
                     danmakuState = "失败"
@@ -702,7 +915,7 @@ class PlayerActivity : AppCompatActivity() {
                 updateDanmakuButton()
             }
         }
-        if (!accepted) { danmakuLoading = false; danmakuState = "失败"; updateDanmakuButton() }
+        if (!accepted && token == danmakuRequestGeneration) { danmakuLoading = false; danmakuState = "失败"; updateDanmakuButton() }
     }
 
     private fun updateDanmakuButton() {
@@ -713,6 +926,17 @@ class PlayerActivity : AppCompatActivity() {
         danmakuButton.background = Ui.roundedBackground(if (enabled) Ui.blue else Ui.surfaceRaised, Ui.dp(this, 8))
         danmakuButton.setTextColor(if (enabled) Ui.text else Ui.muted)
         danmakuButton.isSelected = enabled
+    }
+
+    private fun playerCodecLabel(value: String): String {
+        val codec = value.substringBefore('.').lowercase()
+        return when {
+            codec.startsWith("avc") -> "H.264"
+            codec.startsWith("hev") || codec.startsWith("hvc") -> "H.265"
+            codec.startsWith("av01") -> "AV1"
+            codec.isBlank() -> ""
+            else -> codec.uppercase()
+        }
     }
 
     private fun applyDanmakuSettings() {
@@ -812,6 +1036,11 @@ class PlayerActivity : AppCompatActivity() {
         if (!sourceReady || exo.duration <= 0) return
         lastCheckpoint = android.os.SystemClock.uptimeMillis()
         resumePosition = exo.currentPosition.coerceAtLeast(0)
+        currentPgc?.let { ref ->
+            ProgressRepository.get(this).savePgc(PgcProgress(ref.copy(cid = currentCid, bvid = currentBvid), resumePosition, exo.duration, System.currentTimeMillis(),
+                completed || exo.playbackState == Player.STATE_ENDED || WatchProgress.nearEnd(resumePosition, exo.duration)), playbackAccount)
+            return
+        }
         val video = VideoSummary(currentBvid, intent.getLongExtra("aid", 0), currentCid, currentTitle,
             intent.getStringExtra("cover").orEmpty(), intent.getStringExtra("author").orEmpty(), WatchProgress.formatPosition(exo.duration), "", 0, 0, 0)
         ProgressRepository.get(this).save(WatchProgress(video, currentCid, intent.getIntExtra("part", 1), resumePosition, exo.duration,
@@ -843,18 +1072,44 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
-        outState.putLong("position", player?.currentPosition ?: resumePosition)
+        outState.putLong(STATE_POSITION, player?.currentPosition ?: resumePosition)
+        outState.putString(STATE_BVID, currentBvid)
+        outState.putLong(STATE_CID, currentCid)
+        outState.putString(STATE_TITLE, currentTitle)
+        outState.putString(STATE_ACCOUNT, playbackAccount)
+        currentPgc?.let { playable ->
+            outState.putLong(STATE_PGC_SEASON_ID, playable.seasonId)
+            outState.putLong(STATE_PGC_EPISODE_ID, playable.episodeId)
+            outState.putLong(STATE_PGC_AID, playable.aid)
+            outState.putString(STATE_PGC_SEASON_TITLE, playable.seasonTitle)
+            outState.putString(STATE_PGC_EPISODE_TITLE, playable.episodeTitle)
+            outState.putInt(STATE_PGC_CATEGORY, playable.category.seasonType)
+            outState.putStringArrayList(STATE_PGC_AREAS, ArrayList(playable.areas))
+            outState.putString(STATE_COVER, playable.coverUrl)
+        }
         super.onSaveInstanceState(outState)
     }
 
     override fun onDestroy() {
         loadGeneration++
+        pgcContextGeneration++
+        pgcPicker?.dispose()
+        pgcPicker?.let(pageRoot::removeView)
+        pgcPicker = null
         controls.dispose()
         tickerHandler.removeCallbacksAndMessages(null)
         playerView.player = null
         player?.release()
         player = null
         super.onDestroy()
+    }
+
+    override fun finish() {
+        currentPgc?.let { playable ->
+            setResult(RESULT_OK, Intent().putExtra(EXTRA_PGC_SEASON_ID, playable.seasonId)
+                .putExtra(EXTRA_PGC_EPISODE_ID, playable.episodeId))
+        }
+        super.finish()
     }
 
     companion object {
@@ -864,5 +1119,25 @@ class PlayerActivity : AppCompatActivity() {
         const val EXTRA_BVID = "bvid"
         const val EXTRA_CID = "cid"
         const val EXTRA_TITLE = "title"
+        const val EXTRA_PGC_SEASON_ID = "pgc_season_id"
+        const val EXTRA_PGC_EPISODE_ID = "pgc_episode_id"
+        const val EXTRA_PGC_AID = "pgc_aid"
+        const val EXTRA_PGC_SEASON_TITLE = "pgc_season_title"
+        const val EXTRA_PGC_EPISODE_TITLE = "pgc_episode_title"
+        const val EXTRA_PGC_CATEGORY = "pgc_category"
+        const val EXTRA_PGC_AREAS = "pgc_areas"
+        private const val STATE_POSITION = "player_position"
+        private const val STATE_BVID = "player_bvid"
+        private const val STATE_CID = "player_cid"
+        private const val STATE_TITLE = "player_title"
+        private const val STATE_ACCOUNT = "player_account"
+        private const val STATE_PGC_SEASON_ID = "player_pgc_season_id"
+        private const val STATE_PGC_EPISODE_ID = "player_pgc_episode_id"
+        private const val STATE_PGC_AID = "player_pgc_aid"
+        private const val STATE_PGC_SEASON_TITLE = "player_pgc_season_title"
+        private const val STATE_PGC_EPISODE_TITLE = "player_pgc_episode_title"
+        private const val STATE_PGC_CATEGORY = "player_pgc_category"
+        private const val STATE_PGC_AREAS = "player_pgc_areas"
+        private const val STATE_COVER = "player_cover"
     }
 }

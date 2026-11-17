@@ -35,8 +35,8 @@ android {
         applicationId = "com.lvsaber.bilitv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 19
-        versionName = "0.12.2"
+        versionCode = 38
+        versionName = "0.12.20"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -54,6 +54,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+            resValue("string", "app_name", "biliTv Debug")
+        }
+
         release {
             if (releaseSigningConfigured) {
                 signingConfig = signingConfigs.getByName("release")
@@ -66,12 +71,14 @@ android {
         }
     }
 
-    // Keep every debug build identifiable so test devices can retain and
-    // compare older APKs instead of silently overwriting app-debug.apk.
+    // Keep both build types identifiable so Debug and Release APKs can be
+    // installed and retained side by side without filename collisions.
     applicationVariants.all {
-        if (buildType.name == "debug") {
+        val variantType = buildType.name
+        if (variantType == "debug" || variantType == "release") {
             outputs.all {
-                (this as BaseVariantOutputImpl).outputFileName = "biliTv-debug-v${versionName}-vc${versionCode}.apk"
+                (this as BaseVariantOutputImpl).outputFileName =
+                    "biliTv-${variantType}-v${versionName}-vc${versionCode}.apk"
             }
         }
     }
@@ -95,9 +102,11 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.media3:media3-exoplayer:1.5.1")
     implementation("androidx.media3:media3-exoplayer-dash:1.5.1")
+    implementation("androidx.media3:media3-exoplayer-hls:1.5.1")
     implementation("androidx.media3:media3-ui:1.5.1")
     implementation("androidx.media3:media3-datasource:1.5.1")
     implementation("com.google.zxing:core:3.5.3")
+    implementation("org.brotli:dec:0.1.2")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
 }

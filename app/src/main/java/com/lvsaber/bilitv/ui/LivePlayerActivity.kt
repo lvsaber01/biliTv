@@ -1,0 +1,1100 @@
+package com.lvsaber.bilitv.ui
+
+import android.content.Context
+import android.graphics.RectF
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
+import android.view.Gravity
+import android.view.KeyEvent
+import android.view.View
+import android.view.WindowManager
+import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
+import android.widget.LinearLayout
+import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
+import androidx.appcompat.app.AppCompatActivity
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
+import com.lvsaber.bilitv.core.AppExecutors
+import com.lvsaber.bilitv.data.AppSettings
+import com.lvsaber.bilitv.data.BiliApiClient
+import com.lvsaber.bilitv.data.BiliApiException
+import com.lvsaber.bilitv.data.LiveCodecPreference
+import com.lvsaber.bilitv.data.LiveControlsPolicy
+import com.lvsaber.bilitv.data.LiveDanmakuClient
+import com.lvsaber.bilitv.data.LiveDanmakuState
+import com.lvsaber.bilitv.data.LiveLibraryRepository
+import com.lvsaber.bilitv.data.LiveOverlayBackAction
+import com.lvsaber.bilitv.data.LivePlaybackAttempt
+import com.lvsaber.bilitv.data.LiveProtocolPreference
+import com.lvsaber.bilitv.data.LiveQualityOption
+import com.lvsaber.bilitv.data.LiveQualityPolicy
+import com.lvsaber.bilitv.data.LiveRoomDetails
+import com.lvsaber.bilitv.data.LiveRoomSummary
+import com.lvsaber.bilitv.data.LiveStreamProfile
+import com.lvsaber.bilitv.data.LiveRecoveryPolicy
+import com.lvsaber.bilitv.data.LiveStreamRefreshPolicy
+import com.lvsaber.bilitv.data.PlaybackCodec
+import com.lvsaber.bilitv.data.PlaybackDeviceCapabilities
+import java.util.concurrent.atomic.AtomicInteger
+
+@androidx.media3.common.util.UnstableApi
+class LivePlayerActivity : AppCompatActivity() {
+    private lateinit var api: BiliApiClient
+    private lateinit var library: LiveLibraryRepository
+    private lateinit var root: FrameLayout
+    private lateinit var playerView: PlayerView
+    private lateinit var danmakuOverlay: LiveDanmakuOverlay
+    private lateinit var pauseScrim: View
+    private lateinit var topScrim: View
+    private lateinit var bottomScrim: View
+    private lateinit var header: LinearLayout
+    private lateinit var headerTitle: TextView
+    private lateinit var headerMeta: TextView
+    private lateinit var status: TextView
+    private lateinit var errorPanel: LinearLayout
+    private lateinit var errorText: TextView
+    private lateinit var controls: LinearLayout
+    private lateinit var morePanel: LinearLayout
+    private lateinit var moreButton: Button
+    private lateinit var moreCloseButton: Button
+    private var moreOptionButtons: List<Button> = emptyList()
+    private lateinit var playButton: Button
+    private lateinit var danmakuButton: Button
+    private lateinit var favoriteButton: Button
+    private lateinit var qualityButton: Button
+    private lateinit var codecButton: Button
+    private lateinit var protocolButton: Button
+    private lateinit var routeButton: Button
+    private var player: ExoPlayer? = null
+    private var room: LiveRoomDetails? = null
+    private var danmakuClient: LiveDanmakuClient? = null
+    private var danmakuState = LiveDanmakuState.CONNECTING
+    private var settings = AppSettings()
+    private var qualities: List<LiveQualityOption> = emptyList()
+    private var profiles: List<LiveStreamProfile> = emptyList()
+    private var attempts: List<LivePlaybackAttempt> = emptyList()
+    private var currentAttemptIndex = 0
+    private var automaticRetriesUsed = 0
+    private var currentQualityId = 0
+    private var controlsVisible = false
+    private var playbackErrorMessage: String? = null
+    private var activeChoiceDialog: androidx.appcompat.app.AlertDialog? = null
+    private var firstFrameRendered = false
+    private var sessionGeneration = 0
+    private var streamGeneration = 0
+    private var streamAddressIssuedAtElapsedRealtimeMs = 0L
+    private var addressRefreshInProgress = false
+    private var addressRefreshAttempted = false
+    private var pendingPlaybackFailure: Throwable? = null
+    private var addressRenewalFailureCount = 0
+    private var streamRenewalRunnable: Runnable? = null
+    private var liveStallRunnable: Runnable? = null
+    private var startTimeoutRunnable: Runnable? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val controlsTimeout = Runnable { hideControls() }
+    private var danmakuSurface: View? = null
+    private val surfaceListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateDanmakuViewport() }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        Ui.keepLandscapeOnTelevision(this)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        window.decorView.systemUiVisibility = (
+            View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+            )
+        api = BiliApiClient(this)
+        library = LiveLibraryRepository.get(this)
+        settings = AppSettings.load(this)
+        val roomId = intent.getLongExtra(EXTRA_ROOM_ID, 0L)
+        if (roomId <= 0L) { finish(); return }
+        setContentView(buildPlayerScreen())
+        showControls(focusFirst = true)
+        loadRoom(roomId)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                when {
+                    activeChoiceDialog?.isShowing == true -> activeChoiceDialog?.dismiss()
+                    morePanel.visibility == View.VISIBLE -> closeMorePanel()
+                    LiveControlsPolicy.backAction(
+                        dialogOpen = false,
+                        controlsVisible = controlsVisible || errorPanel.visibility == View.VISIBLE,
+                    ) == LiveOverlayBackAction.HIDE_CONTROLS -> hideControls()
+                    else -> finish()
+                }
+            }
+        })
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN && event.keyCode in setOf(
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER,
+                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+                KeyEvent.KEYCODE_MENU,
+            ) && !controlsVisible
+        ) {
+            showControls(focusFirst = event.keyCode != KeyEvent.KEYCODE_DPAD_DOWN)
+            if (event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN && errorPanel.visibility != View.VISIBLE) danmakuButton.requestFocus()
+            return true
+        }
+        if (event.action == KeyEvent.ACTION_DOWN && event.keyCode == KeyEvent.KEYCODE_MENU) {
+            showControls(focusFirst = true)
+            return true
+        }
+        if (event.action == KeyEvent.ACTION_DOWN && controlsVisible && errorPanel.visibility != View.VISIBLE &&
+            event.keyCode in setOf(KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)
+        ) {
+            val focused = currentFocus
+            when {
+                focused?.let { isInside(controls, it) } == true && event.keyCode == KeyEvent.KEYCODE_DPAD_UP -> {
+                    playButton.requestFocus(); return true
+                }
+                focused?.let { isInside(controls, it) } == true -> return true
+                focused === playButton && event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    (danmakuButton.takeIf { it.visibility == View.VISIBLE } ?: qualityButton).requestFocus(); return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        releaseSession()
+    }
+
+    override fun onDestroy() {
+        releaseSession()
+        danmakuSurface?.removeOnLayoutChangeListener(surfaceListener)
+        danmakuSurface = null
+        mainHandler.removeCallbacksAndMessages(null)
+        super.onDestroy()
+    }
+
+    private fun buildPlayerScreen(): View {
+        root = FrameLayout(this).apply { setBackgroundColor(android.graphics.Color.BLACK); isFocusable = true; isFocusableInTouchMode = true }
+        playerView = PlayerView(this).apply {
+            useController = false
+            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+            setShutterBackgroundColor(android.graphics.Color.BLACK)
+            isFocusable = true
+            setOnClickListener { if (controlsVisible) hideControls() else showControls(focusFirst = false) }
+        }
+        root.addView(playerView, FrameLayout.LayoutParams(-1, -1))
+        danmakuOverlay = LiveDanmakuOverlay(this).apply {
+            overlayEnabled = settings.liveDanmakuEnabled
+            displaySettings = settings.danmaku
+        }
+        root.addView(danmakuOverlay, FrameLayout.LayoutParams(-1, -1))
+
+        pauseScrim = View(this).apply { setBackgroundColor(0x55000000); visibility = View.GONE }
+        root.addView(pauseScrim, FrameLayout.LayoutParams(-1, -1))
+        topScrim = View(this).apply {
+            background = android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(0xB80A0D12.toInt(), 0x620A0D12, android.graphics.Color.TRANSPARENT),
+            )
+            visibility = View.GONE
+        }
+        root.addView(topScrim, FrameLayout.LayoutParams(-1, Ui.dp(this, 176), Gravity.TOP))
+        bottomScrim = View(this).apply {
+            background = android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(android.graphics.Color.TRANSPARENT, 0xB80A0D12.toInt(), 0xF20A0D12.toInt()),
+            )
+            visibility = View.GONE
+        }
+        root.addView(bottomScrim, FrameLayout.LayoutParams(-1, Ui.dp(this, 220), Gravity.BOTTOM))
+
+        header = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(Ui.dp(context, 28), Ui.dp(context, 18), Ui.dp(context, 28), Ui.dp(context, 8))
+            visibility = View.GONE
+        }
+        headerTitle = Ui.text(this, "", 18f, Ui.text).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }
+        headerMeta = Ui.text(this, "", 12f, Ui.muted).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }
+        header.addView(headerTitle)
+        header.addView(headerMeta)
+        root.addView(header, FrameLayout.LayoutParams(-1, -2, Gravity.TOP).apply {
+            leftMargin = Ui.dp(this@LivePlayerActivity, 22); topMargin = Ui.dp(this@LivePlayerActivity, 22); rightMargin = Ui.dp(this@LivePlayerActivity, 22)
+        })
+
+        status = Ui.text(this, "正在连接直播间…", 15f, Ui.text).apply {
+            gravity = Gravity.CENTER
+            background = Ui.roundedBackground(0xB8000000.toInt(), Ui.dp(context, 12))
+            setPadding(Ui.dp(context, 14), Ui.dp(context, 8), Ui.dp(context, 14), Ui.dp(context, 8))
+        }
+        root.addView(status, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
+
+        errorPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            background = Ui.roundedBackground(0xE6161B22.toInt(), Ui.dp(context, 18))
+            setPadding(Ui.dp(context, 22), Ui.dp(context, 16), Ui.dp(context, 22), Ui.dp(context, 18))
+            visibility = View.GONE
+        }
+        errorText = Ui.text(this, "", 16f, Ui.text).apply { gravity = Gravity.CENTER; maxLines = 3 }
+        errorPanel.addView(errorText, LinearLayout.LayoutParams(-1, -2))
+        val errorActions = LinearLayout(this).apply { gravity = Gravity.CENTER }
+        errorActions.addView(Ui.button(this, "重试") { retryManually() })
+        errorActions.addView(Ui.button(this, "线路") { showRouteChoices() }.apply {
+            layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(context, 42)).apply { marginStart = Ui.dp(this@LivePlayerActivity, 8) }
+        })
+        errorActions.addView(Ui.button(this, "返回") { finish() }.apply {
+            layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(context, 42)).apply { marginStart = Ui.dp(this@LivePlayerActivity, 8) }
+        })
+        errorPanel.addView(errorActions, LinearLayout.LayoutParams(-1, Ui.dp(this, 50)).apply { topMargin = Ui.dp(this@LivePlayerActivity, 10) })
+        root.addView(errorPanel, FrameLayout.LayoutParams(Ui.dp(this, 620), -2, Gravity.CENTER))
+
+        playButton = Ui.chip(this, "▶", false) { togglePlayback() }.apply {
+            contentDescription = "播放或暂停直播"
+            setTextSize(28f)
+            minWidth = 0
+            setPadding(0, 0, 0, 0)
+            setTextColor(android.graphics.Color.WHITE)
+            background = Ui.roundedBackground(0xD91C2934.toInt(), Ui.dp(context, 40))
+        }
+        root.addView(playButton, FrameLayout.LayoutParams(Ui.dp(this, 80), Ui.dp(this, 80), Gravity.CENTER))
+
+        controls = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(android.graphics.Color.TRANSPARENT, 0xA80A0D12.toInt(), 0xE80A0D12.toInt()),
+            )
+            setPadding(Ui.dp(context, 28), Ui.dp(context, 12), Ui.dp(context, 28), Ui.dp(context, 18))
+            visibility = View.GONE
+        }
+        val controlRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        danmakuButton = controlButton("弹幕") { toggleDanmaku() }
+        qualityButton = controlButton("画质") { showQualityChoices() }
+        codecButton = controlButton("编码") { showCodecChoices() }
+        protocolButton = controlButton("协议") { showProtocolChoices() }
+        routeButton = controlButton("线路") { showRouteChoices() }
+        favoriteButton = controlButton("收藏") { toggleFavorite() }
+        moreButton = controlButton("更多") { toggleMorePanel() }
+        listOf(danmakuButton, qualityButton, moreButton).forEach(controlRow::addView)
+        controls.addView(HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(controlRow)
+        }, LinearLayout.LayoutParams(-1, Ui.dp(this, 52)))
+        root.addView(controls, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply {
+            bottomMargin = Ui.dp(this@LivePlayerActivity, 2)
+        })
+        morePanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Ui.floatingPanel(context, 18)
+            elevation = Ui.dp(context, 18).toFloat()
+            setPadding(Ui.dp(context, 14), Ui.dp(context, 10), Ui.dp(context, 14), Ui.dp(context, 12))
+            visibility = View.GONE
+        }
+        val moreHeader = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        moreHeader.addView(Ui.text(this, "直播设置", 17f, Ui.text).apply { setPadding(0, 0, 0, 0) }, LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1f))
+        moreCloseButton = Ui.secondaryButton(this, "关闭") { closeMorePanel() }.apply {
+            minWidth = Ui.dp(context, 58)
+            tag = "live-player-more-close"
+            setOnKeyListener { _, keyCode, event ->
+                if (event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                    moreOptionButtons.firstOrNull()?.requestFocus(); true
+                } else if (event.action == KeyEvent.ACTION_DOWN && keyCode in setOf(KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT)) true
+                else false
+            }
+        }
+        morePanel.addView(moreHeader)
+        val optionActions = listOf(
+            "编码格式" to { closeMorePanel(); showCodecChoices() },
+            "直播协议" to { closeMorePanel(); showProtocolChoices() },
+            "播放线路" to { closeMorePanel(); showRouteChoices() },
+            "收藏直播间" to { closeMorePanel(); toggleFavorite() },
+        )
+        moreOptionButtons = optionActions.mapIndexed { index, (label, action) ->
+            controlButton(label, action).apply {
+                background = Ui.roundedBackground(Ui.surfaceRaised, Ui.dp(context, 10))
+                setTextColor(Ui.text)
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(Ui.dp(context, 14), 0, Ui.dp(context, 12), 0)
+                id = View.generateViewId()
+                setOnKeyListener { _, keyCode, event ->
+                    if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                    when (keyCode) {
+                        KeyEvent.KEYCODE_DPAD_UP -> {
+                            if (index > 0) moreOptionButtons.getOrNull(index - 1)?.requestFocus() else moreCloseButton.requestFocus()
+                            true
+                        }
+                        KeyEvent.KEYCODE_DPAD_DOWN -> { moreOptionButtons.getOrNull(index + 1)?.requestFocus(); true }
+                        KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> true
+                        else -> false
+                    }
+                }
+            }
+        }
+        moreOptionButtons.forEach { option ->
+            morePanel.addView(option, LinearLayout.LayoutParams(-1, Ui.dp(this, 42)).apply { topMargin = Ui.dp(this@LivePlayerActivity, 5) })
+        }
+        updateMoreOptionLabels()
+        root.addView(morePanel, FrameLayout.LayoutParams(Ui.dp(this, 360), -2, Gravity.RIGHT or Gravity.BOTTOM).apply {
+            rightMargin = Ui.dp(this@LivePlayerActivity, 28)
+            bottomMargin = Ui.dp(this@LivePlayerActivity, 92)
+        })
+        root.setOnClickListener { if (controlsVisible) hideControls() else showControls(focusFirst = false) }
+        root.post { updateDanmakuViewport() }
+        return root
+    }
+
+    private fun controlButton(label: String, action: () -> Unit): Button = Ui.button(this, label, action).apply {
+        setTextSize(13f)
+        minWidth = Ui.dp(context, 84)
+        setPadding(Ui.dp(context, 12), 0, Ui.dp(context, 12), 0)
+        background = Ui.roundedBackground(0x991B2732.toInt(), Ui.dp(context, 16))
+        setTextColor(android.graphics.Color.WHITE)
+        layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(this@LivePlayerActivity, 42)).apply { marginEnd = Ui.dp(this@LivePlayerActivity, 8) }
+        setOnFocusChangeListener { view, focused ->
+            Ui.applyFocusHighlight(view, focused)
+            if (focused) armControlsTimeout()
+        }
+    }
+
+    private fun loadRoom(roomId: Long) {
+        status.visibility = View.VISIBLE
+        errorPanel.visibility = View.GONE
+        val token = ++sessionGeneration
+        AppExecutors.io.execute {
+            val result = runCatching { api.getLiveRoomDetails(roomId) }
+            runOnUiThread {
+                if (token != sessionGeneration || isFinishing || isDestroyed) return@runOnUiThread
+                result.onSuccess { details ->
+                    room = details
+                    library.recordWatch(details.summary)
+                    headerTitle.text = "LIVE  ·  ${details.summary.title}"
+                    headerMeta.text = listOf(details.summary.anchorName, details.summary.parentAreaName, details.summary.areaName)
+                        .filter(String::isNotBlank).distinct().joinToString(" · ")
+                    updateFavoriteButton()
+                    if (details.isHidden || details.isLocked) {
+                        showFatal("该直播间已隐藏或锁定。")
+                    } else if (details.summary.liveStatus !in setOf(1, 2)) {
+                        showFatal("主播当前未开播。")
+                    } else {
+                        requestStream(settings.liveQualityId)
+                        if (settings.liveDanmakuEnabled) startDanmaku(details.summary.roomId)
+                    }
+                }.onFailure { showFatal("无法读取直播间信息：${friendlyMessage(it)}") }
+            }
+        }
+    }
+
+    private fun requestStream(
+        requestedQuality: Int,
+        renewal: Boolean = false,
+        showRenewalStatus: Boolean = true,
+    ) {
+        val currentRoom = room ?: return
+        if (renewal && addressRefreshInProgress) return
+        val previousAttempt = attempts.getOrNull(currentAttemptIndex)
+        val token = ++streamGeneration
+        streamRenewalRunnable?.let(mainHandler::removeCallbacks)
+        streamRenewalRunnable = null
+        if (renewal) {
+            addressRefreshInProgress = true
+            if (showRenewalStatus) {
+                status.text = "正在更新直播连接…"
+                status.visibility = View.VISIBLE
+                errorPanel.visibility = View.GONE
+            }
+        } else {
+            addressRefreshInProgress = false
+            addressRefreshAttempted = false
+            pendingPlaybackFailure = null
+            addressRenewalFailureCount = 0
+            playbackErrorMessage = null
+            firstFrameRendered = false
+            status.text = "正在获取直播流…"
+            status.visibility = View.VISIBLE
+            errorPanel.visibility = View.GONE
+        }
+        val protocol = settings.liveProtocolPreference
+        val codec = settings.liveCodecPreference
+        val initialQn = requestedQuality.takeIf { it > 0 } ?: 10_000
+        AppExecutors.io.execute {
+            val result = runCatching {
+                val first = api.getLivePlayInfo(currentRoom.summary.roomId, initialQn, protocol, codec)
+                val available = first.first
+                val targetQn = LiveQualityPolicy.targetQuality(requestedQuality, available, first.second)
+                    ?: throw BiliApiException(-500, "直播间没有可用画质")
+                val selected = if (first.second.any { it.qualityId == targetQn }) first
+                    else api.getLivePlayInfo(currentRoom.summary.roomId, targetQn, protocol, codec)
+                val selectedProfiles = selected.second.ifEmpty { first.second }
+                val actualQn = LiveQualityPolicy.actualQuality(targetQn, selectedProfiles)
+                    ?: throw BiliApiException(-500, "直播间没有返回可播放的画质")
+                Triple(available.ifEmpty { selected.first }, actualQn, selectedProfiles)
+            }
+            runOnUiThread {
+                if (token != streamGeneration || isFinishing || isDestroyed) return@runOnUiThread
+                addressRefreshInProgress = false
+                result.onSuccess { (availableQualities, chosenQn, streamProfiles) ->
+                    qualities = availableQualities
+                    profiles = streamProfiles
+                    currentQualityId = chosenQn
+                    if (requestedQuality > 0 && chosenQn != requestedQuality) {
+                        val actualLabel = availableQualities.firstOrNull { it.id == chosenQn }?.label ?: "画质 $chosenQn"
+                        Toast.makeText(this, "直播间未返回所选画质，当前使用 $actualLabel", Toast.LENGTH_LONG).show()
+                    }
+                    val capabilities = runCatching { PlaybackDeviceCapabilities.detect(this) }
+                        .getOrElse { PlaybackDeviceCapabilities.unrestricted() }
+                    val refreshedAttempts = LiveRecoveryPolicy.attempts(
+                        streamProfiles,
+                        chosenQn,
+                        settings.liveProtocolPreference,
+                        settings.liveCodecPreference,
+                        capabilities.supportedCodecs,
+                    )
+                    Log.i(TAG, "Live profiles=${streamProfiles.size} usableAttempts=${refreshedAttempts.size} quality=$chosenQn codec=${settings.liveCodecPreference} protocol=${settings.liveProtocolPreference}")
+                    if (refreshedAttempts.isEmpty()) {
+                        if (renewal) {
+                            val failed = pendingPlaybackFailure
+                            pendingPlaybackFailure = null
+                            if (failed != null) handleCachedPlaybackFailure(failed)
+                            else {
+                                status.visibility = View.GONE
+                                scheduleAddressRenewalRetry()
+                            }
+                        } else {
+                            attempts = emptyList()
+                            showFatal("该直播间当前没有设备可用的 ${settings.liveCodecPreference.label} / ${settings.liveProtocolPreference.label} 流。可在设置或播放器中尝试其他选项。")
+                        }
+                    } else {
+                        attempts = refreshedAttempts
+                        streamAddressIssuedAtElapsedRealtimeMs = SystemClock.elapsedRealtime()
+                        automaticRetriesUsed = 0
+                        addressRenewalFailureCount = 0
+                        currentAttemptIndex = if (renewal) matchingAttemptIndex(previousAttempt) else 0
+                        firstFrameRendered = false
+                        val failed = pendingPlaybackFailure
+                        pendingPlaybackFailure = null
+                        scheduleStreamAddressRenewal()
+                        playAttempt(attempts[currentAttemptIndex], automatic = renewal, addressRenewal = renewal)
+                        if (failed != null) Log.i(TAG, "Recovered live playback with refreshed stream address")
+                    }
+                    updateControlLabels()
+                }.onFailure { error ->
+                    if (renewal) {
+                        val failed = pendingPlaybackFailure
+                        pendingPlaybackFailure = null
+                        if (failed != null) handleCachedPlaybackFailure(failed)
+                        else {
+                            status.visibility = View.GONE
+                            Log.w(TAG, "Live address renewal failed (${error.javaClass.simpleName}); keeping the current stream")
+                            scheduleAddressRenewalRetry()
+                        }
+                    } else {
+                        showFatal("无法获取直播流：${friendlyMessage(error)}")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun matchingAttemptIndex(previous: LivePlaybackAttempt?): Int {
+        if (previous == null) return 0
+        return attempts.indexOfFirst { candidate ->
+            candidate.profile.qualityId == previous.profile.qualityId &&
+                candidate.profile.protocol == previous.profile.protocol &&
+                candidate.profile.codec == previous.profile.codec &&
+                candidate.profile.format == previous.profile.format &&
+                candidate.route.label == previous.route.label
+        }.takeIf { it >= 0 } ?: attempts.indexOfFirst {
+            it.profile.protocol == previous.profile.protocol && it.profile.codec == previous.profile.codec
+        }.takeIf { it >= 0 } ?: 0
+    }
+
+    private fun playAttempt(attempt: LivePlaybackAttempt, automatic: Boolean, addressRenewal: Boolean = false) {
+        val currentRoom = room ?: return
+        val resumePlayback = player?.playWhenReady ?: true
+        playbackErrorMessage = null
+        firstFrameRendered = false
+        Log.i(TAG, "Starting live qn=${attempt.profile.qualityId} protocol=${attempt.profile.protocol} codec=${attempt.profile.codec} route=${attempt.route.label} automatic=$automatic retry=$automaticRetriesUsed")
+        releasePlayerOnly()
+        errorPanel.visibility = View.GONE
+        status.visibility = View.VISIBLE
+        status.text = when {
+            addressRenewal -> "正在续接直播流…"
+            automatic -> "线路异常，正在尝试 ${attempt.route.label} · ${attempt.profile.protocol.label}…"
+            else -> "正在连接 ${attempt.route.label} · ${attempt.profile.protocol.label}…"
+        }
+        val httpFactory = DefaultHttpDataSource.Factory()
+            .setUserAgent(PLAYER_USER_AGENT)
+            .setConnectTimeoutMs(10_000)
+            .setReadTimeoutMs(15_000)
+            .setDefaultRequestProperties(mapOf("Referer" to "https://live.bilibili.com/${currentRoom.summary.roomId}"))
+        val sourceFactory = DefaultMediaSourceFactory(this).setDataSourceFactory(httpFactory)
+        val exo = ExoPlayer.Builder(this).setMediaSourceFactory(sourceFactory).build()
+        player = exo
+        playerView.player = exo
+        exo.addListener(object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                updatePlayButton()
+                if (playbackState == Player.STATE_BUFFERING) {
+                    if (firstFrameRendered) status.text = "正在缓冲直播…"
+                    else status.text = "正在连接直播流…"
+                    status.visibility = View.VISIBLE
+                    if (firstFrameRendered) scheduleLiveStallTimeout(exo)
+                } else if (playbackState == Player.STATE_READY && firstFrameRendered) {
+                    liveStallRunnable?.let(mainHandler::removeCallbacks)
+                    liveStallRunnable = null
+                    status.visibility = View.GONE
+                }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                startTimeoutRunnable?.let(mainHandler::removeCallbacks)
+                liveStallRunnable?.let(mainHandler::removeCallbacks)
+                liveStallRunnable = null
+                handlePlaybackFailure(error)
+            }
+        })
+        exo.addAnalyticsListener(object : AnalyticsListener {
+            override fun onRenderedFirstFrame(eventTime: AnalyticsListener.EventTime, output: Any, renderTimeMs: Long) {
+                runOnUiThread {
+                    if (player !== exo || isFinishing || isDestroyed) return@runOnUiThread
+                    firstFrameRendered = true
+                    addressRefreshAttempted = false
+                    pendingPlaybackFailure = null
+                    startTimeoutRunnable?.let(mainHandler::removeCallbacks)
+                    startTimeoutRunnable = null
+                    status.visibility = View.GONE
+                    errorPanel.visibility = View.GONE
+                    header.visibility = if (controlsVisible) View.VISIBLE else View.GONE
+                    updateControlLabels()
+                    scheduleStreamAddressRenewal()
+                    if (exo.playbackState == Player.STATE_BUFFERING) scheduleLiveStallTimeout(exo)
+                    armControlsTimeout()
+                }
+            }
+        })
+        val itemBuilder = MediaItem.Builder().setUri(attempt.route.url)
+        if (attempt.profile.protocol == com.lvsaber.bilitv.data.LiveStreamProtocol.HLS) {
+            itemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
+        }
+        exo.setMediaItem(itemBuilder.build())
+        exo.playWhenReady = resumePlayback
+        exo.prepare()
+        scheduleStartTimeout(exo)
+        updateControlLabels()
+    }
+
+    private fun scheduleStartTimeout(target: ExoPlayer) {
+        startTimeoutRunnable?.let(mainHandler::removeCallbacks)
+        val timeout = Runnable {
+            if (player === target && !firstFrameRendered && target.playWhenReady && !isFinishing && !isDestroyed) {
+                handlePlaybackFailure(BiliApiException(-1008, "直播首帧等待超时"))
+            }
+        }
+        startTimeoutRunnable = timeout
+        mainHandler.postDelayed(timeout, START_TIMEOUT_MS)
+    }
+
+    private fun handlePlaybackFailure(error: Throwable) {
+        status.visibility = View.GONE
+        liveStallRunnable?.let(mainHandler::removeCallbacks)
+        liveStallRunnable = null
+        if (addressRefreshInProgress) {
+            addressRefreshAttempted = true
+            pendingPlaybackFailure = error
+            return
+        }
+        val currentRoute = attempts.getOrNull(currentAttemptIndex)?.route
+        val addressExpiredOrUnknown = LiveStreamRefreshPolicy.shouldRefreshAfterFailure(
+            route = currentRoute,
+            issuedAtElapsedRealtimeMs = streamAddressIssuedAtElapsedRealtimeMs,
+            nowElapsedRealtimeMs = SystemClock.elapsedRealtime(),
+            nowEpochSeconds = System.currentTimeMillis() / 1_000L,
+        )
+        if (firstFrameRendered && !addressRefreshAttempted && addressExpiredOrUnknown &&
+            settings.liveAutoRecoveryEnabled && isRecoverable(error)
+        ) {
+            addressRefreshAttempted = true
+            pendingPlaybackFailure = error
+            requestStream(currentQualityId.takeIf { it > 0 } ?: settings.liveQualityId, renewal = true)
+            return
+        }
+        handleCachedPlaybackFailure(error)
+    }
+
+    private fun handleCachedPlaybackFailure(error: Throwable) {
+        status.visibility = View.GONE
+        val nextIndex = LiveRecoveryPolicy.nextAttempt(
+            attempts,
+            currentAttemptIndex,
+            automaticRetriesUsed,
+            settings.liveAutoRecoveryEnabled && isRecoverable(error),
+        )
+        val playbackCode = (error as? PlaybackException)?.errorCode
+        val apiCode = (error as? BiliApiException)?.apiCode
+        Log.w(TAG, "Live playback failed playbackCode=${playbackCode ?: "-"} apiCode=${apiCode ?: "-"} attempt=${currentAttemptIndex + 1}/${attempts.size} retries=$automaticRetriesUsed next=${nextIndex?.plus(1) ?: "none"}")
+        if (nextIndex != null) {
+            automaticRetriesUsed++
+            currentAttemptIndex = nextIndex
+            val next = attempts[nextIndex]
+            Toast.makeText(this, "${friendlyMessage(error)} · 自动尝试${next.route.label} ${next.profile.protocol.label}", Toast.LENGTH_SHORT).show()
+            playAttempt(next, automatic = true)
+            return
+        }
+        showPlaybackError("直播播放失败：${friendlyMessage(error)}")
+    }
+
+    private fun scheduleStreamAddressRenewal() {
+        streamRenewalRunnable?.let(mainHandler::removeCallbacks)
+        streamRenewalRunnable = null
+        if (attempts.isEmpty() || streamAddressIssuedAtElapsedRealtimeMs <= 0L) return
+        val delayMs = LiveStreamRefreshPolicy.delayMs(
+            routes = attempts.map { it.route }.distinctBy { it.url },
+            issuedAtElapsedRealtimeMs = streamAddressIssuedAtElapsedRealtimeMs,
+            nowElapsedRealtimeMs = SystemClock.elapsedRealtime(),
+            nowEpochSeconds = System.currentTimeMillis() / 1_000L,
+        ) ?: return
+        val renewal = Runnable {
+            streamRenewalRunnable = null
+            if (player != null && !isFinishing && !isDestroyed && !addressRefreshInProgress) {
+                requestStream(currentQualityId, renewal = true, showRenewalStatus = false)
+            }
+        }
+        streamRenewalRunnable = renewal
+        mainHandler.postDelayed(renewal, delayMs)
+    }
+
+    private fun scheduleAddressRenewalRetry() {
+        streamRenewalRunnable?.let(mainHandler::removeCallbacks)
+        streamRenewalRunnable = null
+        val delayMs = ADDRESS_RENEWAL_RETRY_DELAYS_MS.getOrNull(addressRenewalFailureCount++) ?: return
+        val retry = Runnable {
+            streamRenewalRunnable = null
+            if (player != null && !isFinishing && !isDestroyed && !addressRefreshInProgress) {
+                requestStream(currentQualityId, renewal = true, showRenewalStatus = false)
+            }
+        }
+        streamRenewalRunnable = retry
+        mainHandler.postDelayed(retry, delayMs)
+    }
+
+    private fun scheduleLiveStallTimeout(target: ExoPlayer) {
+        liveStallRunnable?.let(mainHandler::removeCallbacks)
+        val timeout = Runnable {
+            if (player === target && firstFrameRendered && target.playWhenReady &&
+                target.playbackState == Player.STATE_BUFFERING && !isFinishing && !isDestroyed
+            ) {
+                Log.w(TAG, "Live stream remained buffering; attempting address renewal/recovery")
+                handlePlaybackFailure(BiliApiException(-1008, "直播流长时间缓冲，正在尝试恢复"))
+            }
+        }
+        liveStallRunnable = timeout
+        mainHandler.postDelayed(timeout, LIVE_BUFFER_STALL_TIMEOUT_MS)
+    }
+
+    private fun isRecoverable(error: Throwable): Boolean {
+        if (error is BiliApiException) return error.apiCode == -1008 || error.httpCode?.let { it in 500..599 } == true
+        val playback = error as? PlaybackException ?: return error.message?.contains("timeout", true) == true
+        return LiveRecoveryPolicy.isRecoverablePlaybackCode(playback.errorCode)
+    }
+
+    private fun showPlaybackError(message: String) {
+        streamRenewalRunnable?.let(mainHandler::removeCallbacks)
+        streamRenewalRunnable = null
+        liveStallRunnable?.let(mainHandler::removeCallbacks)
+        liveStallRunnable = null
+        firstFrameRendered = false
+        playbackErrorMessage = message
+        errorText.text = message
+        val hasAlternates = attempts.size > 1
+        errorPanel.getChildAt(1)?.let { actions ->
+            if (actions is LinearLayout && actions.childCount > 1) actions.getChildAt(1).isEnabled = hasAlternates
+        }
+        showControls(focusFirst = true)
+        focusRetryAction()
+    }
+
+    private fun showFatal(message: String) {
+        streamRenewalRunnable?.let(mainHandler::removeCallbacks)
+        streamRenewalRunnable = null
+        liveStallRunnable?.let(mainHandler::removeCallbacks)
+        liveStallRunnable = null
+        releasePlayerOnly()
+        playbackErrorMessage = message
+        errorText.text = message
+        errorPanel.visibility = View.VISIBLE
+        errorPanel.getChildAt(1)?.let { actions -> if (actions is LinearLayout && actions.childCount > 1) actions.getChildAt(1).isEnabled = false }
+        showControls(focusFirst = false)
+        focusRetryAction()
+    }
+
+    private fun focusRetryAction() {
+        (errorPanel.getChildAt(1) as? LinearLayout)?.getChildAt(0)?.requestFocus()
+    }
+
+    private fun retryManually() {
+        requestStream(currentQualityId.takeIf { it > 0 } ?: settings.liveQualityId)
+    }
+
+    private fun togglePlayback() {
+        val exo = player ?: return
+        if (exo.playWhenReady) {
+            exo.pause()
+        } else {
+            exo.play()
+            if (!firstFrameRendered) scheduleStartTimeout(exo)
+        }
+        updatePlayButton()
+        armControlsTimeout()
+    }
+
+    private fun toggleDanmaku() {
+        settings = settings.copy(liveDanmakuEnabled = !danmakuOverlay.overlayEnabled)
+        settings.save(this)
+        danmakuOverlay.overlayEnabled = settings.liveDanmakuEnabled
+        if (settings.liveDanmakuEnabled) room?.let { startDanmaku(it.summary.roomId) }
+        else { danmakuClient?.disconnect(); danmakuClient = null }
+        updateControlLabels()
+        armControlsTimeout()
+    }
+
+    private fun startDanmaku(roomId: Long) {
+        danmakuClient?.disconnect()
+        val client = LiveDanmakuClient(api, roomId, object : LiveDanmakuClient.Listener {
+            override fun onState(state: LiveDanmakuState, detail: String) {
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    danmakuState = state
+                    updateDanmakuButtonLabel()
+                    if (state == LiveDanmakuState.UNAVAILABLE) {
+                        status.text = detail
+                        if (player?.isPlaying == true) {
+                            Toast.makeText(this@LivePlayerActivity, detail, Toast.LENGTH_LONG).show()
+                        } else {
+                            status.visibility = View.VISIBLE
+                        }
+                    }
+                }
+            }
+
+            override fun onMessage(text: String) {
+                runOnUiThread { if (!isFinishing && !isDestroyed) danmakuOverlay.addMessage(text) }
+            }
+        })
+        danmakuClient = client
+        client.connect()
+    }
+
+    private fun showQualityChoices() {
+        if (qualities.isEmpty()) return
+        val options = qualities.distinctBy { it.id }.sortedByDescending { it.id }
+        showChoiceDialog("直播画质", options.map { it.label }) { index ->
+            val quality = options[index]
+            settings = settings.copy(liveQualityId = quality.id)
+            settings.save(this)
+            requestStream(quality.id)
+        }
+    }
+
+    private fun showCodecChoices() {
+        val options = LiveCodecPreference.entries.toList()
+        showChoiceDialog("直播编码", options.map { it.label }) { index ->
+            settings = settings.copy(liveCodecPreference = options[index])
+            settings.save(this)
+            requestStream(currentQualityId)
+        }
+    }
+
+    private fun showProtocolChoices() {
+        val options = LiveProtocolPreference.entries.toList()
+        showChoiceDialog("直播协议", options.map { it.label }) { index ->
+            settings = settings.copy(liveProtocolPreference = options[index])
+            settings.save(this)
+            requestStream(currentQualityId)
+        }
+    }
+
+    private fun showRouteChoices() {
+        if (attempts.isEmpty()) return
+        val current = attempts.getOrNull(currentAttemptIndex)?.profile ?: return
+        val options = current.routes
+        if (options.size <= 1) {
+            Toast.makeText(this, "当前直播流只有一条可用线路", Toast.LENGTH_SHORT).show()
+            return
+        }
+        showChoiceDialog("选择直播线路", options.map { it.label }) { index ->
+            val desired = options[index]
+            val matching = attempts.indexOfFirst { it.profile.protocol == current.protocol && it.profile.codec == current.codec && it.route.url == desired.url }
+            if (matching >= 0) {
+                currentAttemptIndex = matching
+                automaticRetriesUsed = 0
+                playAttempt(attempts[matching], automatic = false)
+            }
+        }
+    }
+
+    private fun showChoiceDialog(title: String, items: List<String>, onSelected: (Int) -> Unit) {
+        if (items.isEmpty()) return
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(title)
+            .setItems(items.toTypedArray()) { _, which -> onSelected(which) }
+            .create()
+        activeChoiceDialog = dialog
+        dialog.setOnDismissListener {
+            if (activeChoiceDialog === dialog) activeChoiceDialog = null
+            armControlsTimeout()
+        }
+        dialog.show()
+        showControls(focusFirst = false)
+    }
+
+    private fun toggleFavorite() {
+        val summary = room?.summary ?: return
+        library.toggleFavorite(summary)
+        updateFavoriteButton()
+        Toast.makeText(this, if (library.isFavorite(summary.roomId)) "已收藏" else "已取消收藏", Toast.LENGTH_SHORT).show()
+        armControlsTimeout()
+    }
+
+    private fun updateFavoriteButton() {
+        val saved = room?.summary?.roomId?.let(library::isFavorite) == true
+        favoriteButton.text = if (saved) "已收藏" else "收藏"
+        favoriteButton.setTextColor(if (saved) Ui.pink else android.graphics.Color.WHITE)
+        updateMoreOptionLabels()
+    }
+
+    private fun updateControlLabels() {
+        updatePlayButton()
+        updateDanmakuButtonLabel()
+        qualityButton.text = qualities.firstOrNull { it.id == currentQualityId }?.label?.let { "画质：$it" } ?: "画质：自动"
+        codecButton.text = "编码：${settings.liveCodecPreference.label.substringBefore(" · ")}"
+        protocolButton.text = "协议：${settings.liveProtocolPreference.label.substringBefore(" · ")}"
+        val attempt = attempts.getOrNull(currentAttemptIndex)
+        routeButton.text = "线路：${attempt?.route?.label ?: "自动"}"
+        updateFavoriteButton()
+        updateMoreOptionLabels()
+    }
+
+    private fun updateMoreOptionLabels() {
+        if (moreOptionButtons.isEmpty()) return
+        moreOptionButtons.getOrNull(0)?.text = codecButton.text
+        moreOptionButtons.getOrNull(1)?.text = protocolButton.text
+        moreOptionButtons.getOrNull(2)?.text = routeButton.text
+        val saved = room?.summary?.roomId?.let(library::isFavorite) == true
+        moreOptionButtons.getOrNull(3)?.text = if (saved) "已收藏 · 点击取消收藏" else "收藏直播间"
+    }
+
+    private fun updateDanmakuButtonLabel() {
+        danmakuButton.text = if (!danmakuOverlay.overlayEnabled) "弹幕：关" else when (danmakuState) {
+            LiveDanmakuState.CONNECTED -> "弹幕：已连接"
+            LiveDanmakuState.UNAVAILABLE -> "弹幕：不可用"
+            LiveDanmakuState.CONNECTING -> "弹幕：连接中"
+            LiveDanmakuState.RECONNECTING -> "弹幕：重连中"
+        }
+    }
+
+    private fun updatePlayButton() {
+        playButton.text = if (player?.playWhenReady == true) "Ⅱ" else "▶"
+        playButton.contentDescription = if (player?.playWhenReady == true) "暂停直播" else "继续直播"
+        updatePlaybackChrome()
+    }
+
+    private fun updatePlaybackChrome(animateHide: Boolean = false) {
+        if (!::playButton.isInitialized) return
+        val errorVisible = ::errorPanel.isInitialized && errorPanel.visibility == View.VISIBLE
+        val showChrome = controlsVisible
+        val showPauseScrim = showChrome && firstFrameRendered && player?.playWhenReady != true && !errorVisible
+        setChromeVisibility(topScrim, showChrome, animateHide)
+        setChromeVisibility(bottomScrim, showChrome, animateHide)
+        setChromeVisibility(playButton, showChrome && !errorVisible, animateHide)
+        setChromeVisibility(pauseScrim, showPauseScrim, animateHide)
+    }
+
+    private fun setChromeVisibility(view: View, visible: Boolean, animateHide: Boolean = false) {
+        view.animate().cancel()
+        if (visible) {
+            view.visibility = View.VISIBLE
+            view.alpha = 1f
+        } else if (animateHide && view.visibility == View.VISIBLE) {
+            view.animate().alpha(0f).setDuration(CONTROLS_FADE_MS).withEndAction {
+                if (!controlsVisible) {
+                    view.visibility = View.GONE
+                    view.alpha = 1f
+                }
+            }.start()
+        } else {
+            view.visibility = View.GONE
+            view.alpha = 1f
+        }
+    }
+
+    private fun showControls(focusFirst: Boolean) {
+        controlsVisible = true
+        controls.animate().cancel()
+        header.animate().cancel()
+        errorPanel.animate().cancel()
+        controls.alpha = 1f
+        header.alpha = 1f
+        controls.visibility = View.VISIBLE
+        header.visibility = View.VISIBLE
+        if (playbackErrorMessage != null) {
+            errorText.text = playbackErrorMessage
+            errorPanel.alpha = 1f
+            errorPanel.visibility = View.VISIBLE
+            status.visibility = View.GONE
+        } else {
+            errorPanel.visibility = View.GONE
+        }
+        if (focusFirst) {
+            if (playbackErrorMessage != null) focusRetryAction() else playButton.requestFocus()
+        }
+        updatePlaybackChrome()
+        armControlsTimeout()
+    }
+
+    private fun hideControls() {
+        closeMorePanel(restoreFocus = false)
+        mainHandler.removeCallbacks(controlsTimeout)
+        if (currentFocus != null && (isInside(controls, currentFocus!!) || isInside(morePanel, currentFocus!!) || isInside(errorPanel, currentFocus!!))) currentFocus?.clearFocus()
+        controls.clearFocus()
+        errorPanel.clearFocus()
+        controlsVisible = false
+        updatePlaybackChrome(animateHide = true)
+        controls.animate().cancel()
+        header.animate().cancel()
+        errorPanel.animate().cancel()
+        controls.animate().alpha(0f).setDuration(CONTROLS_FADE_MS).withEndAction {
+            if (!controlsVisible) { controls.visibility = View.GONE; controls.alpha = 1f }
+        }.start()
+        header.animate().alpha(0f).setDuration(CONTROLS_FADE_MS).withEndAction {
+            if (!controlsVisible) { header.visibility = View.GONE; header.alpha = 1f }
+        }.start()
+        if (playbackErrorMessage != null) {
+            status.text = playbackErrorMessage
+            status.visibility = View.VISIBLE
+            errorPanel.animate().alpha(0f).setDuration(CONTROLS_FADE_MS).withEndAction {
+                if (!controlsVisible) { errorPanel.visibility = View.GONE; errorPanel.alpha = 1f }
+            }.start()
+        } else {
+            errorPanel.visibility = View.GONE
+        }
+        playerView.requestFocus()
+    }
+
+    private fun armControlsTimeout() {
+        mainHandler.removeCallbacks(controlsTimeout)
+        if (LiveControlsPolicy.shouldArmHideTimeout(controlsVisible, activeChoiceDialog?.isShowing == true) && morePanel.visibility != View.VISIBLE) {
+            mainHandler.postDelayed(controlsTimeout, CONTROLS_HIDE_DELAY_MS)
+        }
+    }
+
+    private fun toggleMorePanel() {
+        if (morePanel.visibility == View.VISIBLE) closeMorePanel()
+        else {
+            showControls(focusFirst = false)
+            morePanel.visibility = View.VISIBLE
+            mainHandler.removeCallbacks(controlsTimeout)
+            moreOptionButtons.firstOrNull()?.requestFocus() ?: moreCloseButton.requestFocus()
+        }
+    }
+
+    private fun closeMorePanel(restoreFocus: Boolean = true) {
+        if (!::morePanel.isInitialized || morePanel.visibility != View.VISIBLE) return
+        morePanel.visibility = View.GONE
+        if (restoreFocus) moreButton.requestFocus()
+        armControlsTimeout()
+    }
+
+    private fun updateDanmakuViewport() {
+        if (!::danmakuOverlay.isInitialized || !::playerView.isInitialized) return
+        val surface = playerView.videoSurfaceView
+        if (danmakuSurface !== surface) {
+            danmakuSurface?.removeOnLayoutChangeListener(surfaceListener)
+            danmakuSurface = surface
+            surface?.addOnLayoutChangeListener(surfaceListener)
+        }
+        if (surface == null || surface.width <= 0 || surface.height <= 0) {
+            danmakuOverlay.setVideoBounds(null)
+            return
+        }
+        val surfaceLocation = IntArray(2)
+        val rootLocation = IntArray(2)
+        surface.getLocationOnScreen(surfaceLocation)
+        root.getLocationOnScreen(rootLocation)
+        danmakuOverlay.setVideoBounds(
+            RectF(
+                (surfaceLocation[0] - rootLocation[0]).toFloat(),
+                (surfaceLocation[1] - rootLocation[1]).toFloat(),
+                (surfaceLocation[0] - rootLocation[0] + surface.width).toFloat(),
+                (surfaceLocation[1] - rootLocation[1] + surface.height).toFloat(),
+            ),
+        )
+    }
+
+    private fun releasePlayerOnly() {
+        startTimeoutRunnable?.let(mainHandler::removeCallbacks)
+        startTimeoutRunnable = null
+        liveStallRunnable?.let(mainHandler::removeCallbacks)
+        liveStallRunnable = null
+        playerView.player = null
+        player?.release()
+        player = null
+    }
+
+    private fun releaseSession() {
+        sessionGeneration++
+        streamGeneration++
+        streamRenewalRunnable?.let(mainHandler::removeCallbacks)
+        streamRenewalRunnable = null
+        addressRefreshInProgress = false
+        pendingPlaybackFailure = null
+        mainHandler.removeCallbacks(controlsTimeout)
+        danmakuClient?.disconnect()
+        danmakuClient = null
+        releasePlayerOnly()
+    }
+
+    private fun isInside(ancestor: View, view: View): Boolean {
+        var current: View? = view
+        while (current != null) {
+            if (current === ancestor) return true
+            current = current.parent as? View
+        }
+        return false
+    }
+
+    private fun friendlyMessage(error: Throwable): String = when (error) {
+        is BiliApiException -> when (error.apiCode) {
+            -101, -111 -> "请登录后重试"
+            -352, -412 -> "B 站请求校验未通过"
+            60004 -> "直播间不存在"
+            else -> error.message
+        }
+        is PlaybackException -> error.cause?.message?.take(100) ?: "播放器错误 ${error.errorCode}"
+        else -> error.message?.take(100) ?: "网络异常"
+    }
+
+    companion object {
+        private const val TAG = "LivePlayer"
+        const val EXTRA_ROOM_ID = "live_room_id"
+        private const val PLAYER_USER_AGENT = "Mozilla/5.0 (Linux; Android TV) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"
+        private const val START_TIMEOUT_MS = 12_000L
+        private const val LIVE_BUFFER_STALL_TIMEOUT_MS = 30_000L
+        private const val CONTROLS_HIDE_DELAY_MS = 5_000L
+        private const val CONTROLS_FADE_MS = 180L
+        private val ADDRESS_RENEWAL_RETRY_DELAYS_MS = longArrayOf(30_000L, 60_000L, 120_000L)
+    }
+}

@@ -56,5 +56,12 @@ object AppExecutors {
         ThreadFactory { runnable -> Thread(runnable, "bili-browse-${threadNumber.getAndIncrement()}") },
         ThreadPoolExecutor.AbortPolicy(),
     ).apply { allowCoreThreadTimeOut(true) }
+
+    /** Region-verification requests must not block the browse workers that await them. */
+    val pgcScope: ThreadPoolExecutor = ThreadPoolExecutor(
+        2, 3, 30L, TimeUnit.SECONDS, LinkedBlockingQueue(16),
+        ThreadFactory { runnable -> Thread(runnable, "bili-pgc-scope-${threadNumber.getAndIncrement()}") },
+        ThreadPoolExecutor.AbortPolicy(),
+    ).apply { allowCoreThreadTimeOut(true) }
 }
 

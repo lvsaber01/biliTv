@@ -3,6 +3,7 @@ package com.lvsaber.bilitv.data
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
+import com.lvsaber.bilitv.core.AppExecutors
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
@@ -10,7 +11,11 @@ import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Callable
 import kotlin.math.max
+
+internal fun pgcIndexYearRange(year: Int?): String? =
+    year?.takeIf { it in 1900..2100 }?.let { "[$it,${it + 1})" }
 
 /**
  * Thin API gateway. UI code only talks to typed methods, while endpoint
@@ -23,6 +28,7 @@ class BiliApiClient(context: Context) {
     private var rankingFingerprintFetched = false
     private val rankingFingerprintLock = Any()
     private val rankingCache = ConcurrentHashMap<Int, List<VideoSummary>>()
+    private val pgcScopeCache = ConcurrentHashMap<Long, PgcSeason>()
 
     fun getPopularVideos(page: Int = 1, pageSize: Int = 20): List<VideoSummary> {
         val root = get("/x/web-interface/popular", mapOf("ps" to pageSize.toString(), "pn" to page.toString()))
@@ -135,6 +141,18 @@ class BiliApiClient(context: Context) {
         val data = root.optJSONObject("data")
         val result = data?.optJSONArray("result") ?: JSONArray()
         return result.toVideoSummaries()
+    }
+
+    /** Current web search-square hot terms; the WBI endpoint is preferred. */
+    fun getHotSearches(limit: Int = 10): List<String> {
+        val params = linkedMapOf("limit" to limit.coerceIn(1, 50).toString(), "platform" to "web")
+        val root = runCatching {
+            getSigned("/x/web-interface/wbi/search/square", params, referer = SEARCH_REFERER)
+        }.getOrElse {
+            // Compatibility fallback used by older web clients; keep the signed endpoint primary.
+            get("/x/web-interface/search/square", params, referer = SEARCH_REFERER)
+        }
+        return SearchHotwordParser.parse(root, limit)
     }
 
     fun getVideoDetail(bvid: String): VideoDetail {
@@ -611,6 +629,305 @@ class BiliApiClient(context: Context) {
         return parsePlayerInfo(root)
     }
 
+    fun getPgcPlayerInfo(playable: PgcPlayableRef): PlayerInfo {
+        val params = linkedMapOf("cid" to playable.cid.toString(), "ep_id" to playable.episodeId.toString(),
+            "season_id" to playable.seasonId.toString())
+        if (playable.aid > 0) params["aid"] = playable.aid.toString()
+        if (playable.bvid.isNotBlank()) params["bvid"] = playable.bvid
+        val root = runCatching { getSigned("/x/player/wbi/v2", params) }
+            .getOrElse { get("/x/player/v2", params) }
+        return parsePlayerInfo(root)
+    }
+
+    fun getPgcTimeline(
+        category: PgcCategory,
+        before: Int = 0,
+        after: Int = 7,
+        onPartialVerified: ((List<PgcTimelineDay>) -> Unit)? = null,
+    ): List<PgcTimelineDay> {
+        val root = get("/pgc/web/timeline", mapOf(
+            "types" to category.seasonType.toString(), "before" to before.coerceIn(0, 7).toString(),
+            "after" to after.coerceIn(0, 7).toString(),
+        ))
+        val days = PgcJsonParser.parseTimeline(root, category, allowUnknownScope = true)
+        val unresolvedIds = days.asSequence().flatMap { it.items.asSequence() }
+            .filterNot { it.season.scopeVerified }
+            .map { it.season.seasonId }
+            .distinct()
+            .toList()
+        val verified = mutableMapOf<Long, PgcSeason>()
+        PgcJsonParser.filterTimelineByVerifiedScopes(days, verified)
+            .takeIf { it.isNotEmpty() }
+            ?.let { onPartialVerified?.invoke(it) }
+        if (unresolvedIds.isEmpty()) return days
+        var verificationError: Exception? = null
+        unresolvedIds.chunked(PGC_SCOPE_VERIFY_PARALLELISM).forEach { batch ->
+            val pending = batch.mapNotNull { seasonId ->
+                val cached = pgcScopeCache[seasonId]
+                if (cached != null) {
+                    if (cached.category == category && cached.scopeVerified) verified[seasonId] = cached
+                    null
+                } else {
+                    val future = runCatching {
+                        AppExecutors.pgcScope.submit(Callable { loadPgcSeasonScope(seasonId) })
+                    }.getOrNull()
+                    seasonId to future
+                }
+            }
+            pending.forEach { (seasonId, future) ->
+                val season = try {
+                    future?.get() ?: loadPgcSeasonScope(seasonId)
+                } catch (error: Exception) {
+                    val cause = error.cause as? Exception ?: error
+                    if (cause is InterruptedException) Thread.currentThread().interrupt()
+                    if (cause !is BiliApiException || cause.apiCode != -422) verificationError = verificationError ?: cause
+                    null
+                }
+                if (season != null && season.category == category && season.scopeVerified) verified[seasonId] = season
+            }
+            PgcJsonParser.filterTimelineByVerifiedScopes(days, verified)
+                .takeIf { it.isNotEmpty() }
+                ?.let { onPartialVerified?.invoke(it) }
+        }
+        val filtered = PgcJsonParser.filterTimelineByVerifiedScopes(days, verified)
+        if (filtered.isEmpty()) verificationError?.let { throw it }
+        return filtered
+    }
+
+    fun getPgcRanking(category: PgcCategory, day: Int = 3, limit: Int = 24): List<PgcSeason> {
+        val path = if (category == PgcCategory.JAPANESE_ANIME) "/pgc/web/rank/list" else "/pgc/season/rank/web/list"
+        val root = get(path, mapOf("season_type" to category.seasonType.toString(), "day" to day.coerceIn(3, 7).toString()),
+            referer = if (category == PgcCategory.JAPANESE_ANIME) "https://www.bilibili.com/v/popular/rank/anime" else "https://www.bilibili.com/v/popular/rank/guochuang")
+        val data = root.optJSONObject("data") ?: root.optJSONObject("result") ?: JSONObject()
+        val list = data.optJSONArray("list") ?: JSONArray()
+        val maxItems = limit.coerceIn(1, 99)
+        if (category == PgcCategory.GUOCHUANG) {
+            return (0 until list.length()).mapNotNull { index ->
+                PgcJsonParser.parseSeasonCard(list.optJSONObject(index) ?: return@mapNotNull null, category.seasonType)
+            }.filter { it.category == category }.take(maxItems)
+        }
+        // The ranking feed includes non-Japanese anime and omits `areas`.
+        // Verify ranked candidates from season detail, stopping once the
+        // requested number of Japanese entries has been collected.
+        val candidates = (0 until list.length()).mapNotNull { index ->
+            PgcJsonParser.parseSeasonCard(list.optJSONObject(index) ?: return@mapNotNull null, category.seasonType, allowUnknownScope = true)
+        }
+        val result = mutableListOf<PgcSeason>()
+        var verificationError: Exception? = null
+        var candidateIndex = 0
+        while (candidateIndex < candidates.size && result.size < maxItems) {
+            val unresolved = mutableListOf<PgcSeason>()
+            while (candidateIndex < candidates.size && unresolved.size < PGC_SCOPE_VERIFY_PARALLELISM && result.size < maxItems) {
+                val card = candidates[candidateIndex++]
+                if (card.scopeVerified) {
+                    if (card.category == category) result += card
+                    continue
+                }
+                val cached = pgcScopeCache[card.seasonId]
+                if (cached != null) {
+                    PgcJsonParser.applyVerifiedScope(card, cached)?.takeIf { it.category == category }?.let(result::add)
+                } else unresolved += card
+            }
+            if (unresolved.isEmpty()) continue
+            // Resolve only three candidates at a time; order is retained while their
+            // independent season-detail lookups run concurrently on the bounded browse pool.
+            val pending = unresolved.map { card ->
+                card to runCatching {
+                    AppExecutors.browse.submit(Callable { loadPgcSeasonScope(card.seasonId) })
+                }.getOrNull()
+            }
+            pending.forEach { (card, future) ->
+                val metadata = try {
+                    if (future == null) loadPgcSeasonScope(card.seasonId) else future.get()
+                } catch (error: Exception) {
+                    val cause = error.cause as? Exception ?: error
+                    if (cause !is BiliApiException || cause.apiCode != -422) verificationError = verificationError ?: cause
+                    null
+                }
+                metadata?.let { PgcJsonParser.applyVerifiedScope(card, it) }
+                    ?.takeIf { it.category == category }?.let(result::add)
+            }
+        }
+        if (result.isEmpty()) verificationError?.let { throw it }
+        return result
+    }
+
+    fun getPgcIndex(category: PgcCategory, page: Int = 1, year: Int? = null, finished: Boolean? = null, order: Int = 4): PgcIndexPage {
+        val params = linkedMapOf(
+            "type" to "1", "season_type" to category.seasonType.toString(), "st" to category.seasonType.toString(),
+            "page" to page.coerceAtLeast(1).toString(), "pagesize" to "24", "order" to order.coerceIn(0, 6).toString(),
+            "sort" to "0", "season_version" to "-1", "spoken_language_type" to "-1",
+            // Area 2 is Japan. The API's index cards usually omit area names,
+            // so rely on the server-side filter rather than discarding all rows.
+            "area" to if (category == PgcCategory.JAPANESE_ANIME) "2" else "-1",
+            "is_finish" to (finished?.let { if (it) "1" else "0" } ?: "-1"), "season_status" to "-1",
+            "season_month" to "-1", "copyright" to "-1", "style_id" to "-1",
+        )
+        pgcIndexYearRange(year)?.let { params["year"] = it }
+        val root = get("/pgc/season/index/result", params)
+        val data = root.optJSONObject("data") ?: JSONObject()
+        val list = data.optJSONArray("list") ?: JSONArray()
+        val items = (0 until list.length()).mapNotNull { index ->
+            PgcJsonParser.parseSeasonCard(
+                list.optJSONObject(index) ?: return@mapNotNull null,
+                category.seasonType,
+                allowUnknownScope = category == PgcCategory.JAPANESE_ANIME,
+                verifiedScopeByServerFilter = category == PgcCategory.JAPANESE_ANIME,
+            )
+        }.filter { it.category == category }
+        return PgcIndexPage(items, data.optInt("has_next") == 1)
+    }
+
+    fun searchPgc(keyword: String, category: PgcCategory, page: Int = 1): PgcSearchPage {
+        val params = linkedMapOf("search_type" to "media_bangumi", "keyword" to keyword, "page" to page.coerceAtLeast(1).toString(), "page_size" to "20")
+        val root = runCatching { getSigned("/x/web-interface/wbi/search/type", params) }
+            .getOrElse { get("/x/web-interface/search/type", params) }
+        val data = root.optJSONObject("data") ?: JSONObject()
+        val list = data.optJSONArray("result") ?: JSONArray()
+        val result = mutableListOf<PgcSeason>()
+        for (index in 0 until list.length()) {
+            val raw = list.optJSONObject(index) ?: continue
+            val returnedType = raw.optInt("season_type")
+            if (returnedType > 0 && returnedType != category.seasonType) continue
+            val seasonId = raw.optLong("season_id")
+            val direct = PgcJsonParser.parseSeasonCard(raw, category.seasonType)
+            val verified = direct?.takeIf { it.category == category }
+                ?: if (seasonId > 0) runCatching { getPgcSeasonDetail(seasonId).season }.getOrNull()?.takeIf { it.category == category } else null
+            if (verified != null && result.none { it.seasonId == verified.seasonId }) result += verified
+        }
+        val pages = data.optInt("numPages", data.optInt("num_pages", 1))
+        return PgcSearchPage(result, page < pages)
+    }
+
+    fun getPgcSeasonDetail(seasonId: Long): PgcSeasonDetail {
+        require(seasonId > 0) { "seasonId 无效" }
+        val root = get("/pgc/view/web/season", mapOf("season_id" to seasonId.toString()))
+        val detail = PgcJsonParser.parseDetail(root, seasonId)
+        pgcScopeCache[seasonId] = detail.season
+        val parts = runCatching {
+            PgcJsonParser.parseSections(get("/pgc/web/season/section", mapOf("season_id" to seasonId.toString())), seasonId, detail.episodes)
+        }.getOrNull()
+        return if (parts == null) detail else detail.copy(episodes = parts.episodes, extraSections = parts.extraSections)
+    }
+
+    fun getPgcFollowing(category: PgcCategory, page: Int = 1): PgcIndexPage {
+        if (!hasSession()) throw BiliApiException(-101, "登录后查看我的追番")
+        val mid = getNavigation().optLong("mid")
+        if (mid <= 0) throw BiliApiException(-101, "无法读取当前账号，请重新登录")
+        val root = get("/x/space/bangumi/follow/list", mapOf("vmid" to mid.toString(), "type" to "1", "follow_status" to "0", "ps" to "24", "pn" to page.coerceAtLeast(1).toString()),
+            referer = "https://space.bilibili.com/$mid/bangumi")
+        val data = root.optJSONObject("data") ?: JSONObject()
+        val list = data.optJSONArray("list") ?: JSONArray()
+        val items = mutableListOf<PgcSeason>()
+        for (index in 0 until list.length()) {
+            val raw = list.optJSONObject(index) ?: continue
+            val returnedType = raw.optInt("season_type")
+            if (returnedType > 0 && returnedType != category.seasonType) continue
+            val seasonId = raw.optLong("season_id")
+            val direct = PgcJsonParser.parseSeasonCard(raw, category.seasonType)
+            val verified = direct?.takeIf { it.category == category }
+                ?: if (seasonId > 0) runCatching { getPgcSeasonDetail(seasonId).season }.getOrNull()?.takeIf { it.category == category } else null
+            if (verified != null && items.none { it.seasonId == verified.seasonId }) items += verified.copy(followStatus = verified.followStatus.takeIf { it > 0 } ?: 1)
+        }
+        val total = data.optInt("total")
+        return PgcIndexPage(items, page * 24 < total)
+    }
+
+    fun modifyPgcFollow(seasonId: Long, follow: Boolean) {
+        if (!hasSession()) throw BiliApiException(-101, "请先登录后追番")
+        postForm(if (follow) "/pgc/web/follow/add" else "/pgc/web/follow/del",
+            mapOf("season_id" to seasonId.toString(), "csrf" to csrf()))
+    }
+
+    fun getPgcPlaySource(playable: PgcPlayableRef, settings: AppSettings = AppSettings(),
+        device: PlaybackDeviceCapabilities = PlaybackDeviceCapabilities.unrestricted()): PlaySource {
+        val dashRequested = settings.videoFormat == AppSettings.VideoFormat.DASH || settings.defaultQuality == 0 ||
+            settings.defaultQuality in DASH_QUALITY_IDS || settings.videoCodec != AppSettings.VideoCodec.AUTO
+        val params = linkedMapOf(
+            "ep_id" to playable.episodeId.toString(), "season_id" to playable.seasonId.toString(), "cid" to playable.cid.toString(),
+            "qn" to (settings.defaultQuality.takeIf { it > 0 } ?: 80).toString(), "fnver" to "0",
+            "fnval" to if (dashRequested) DASH_CAPABILITY_FLAGS.toString() else "1", "fourk" to "1",
+            "support_multi_audio" to "true", "platform" to "web", "from_client" to "BROWSER",
+        )
+        if (playable.aid > 0) params["avid"] = playable.aid.toString()
+        if (playable.bvid.isNotBlank()) params["bvid"] = playable.bvid
+        val root = get("/pgc/player/web/v2/playurl", params, referer = "https://www.bilibili.com/bangumi/play/ep${playable.episodeId}")
+        val result = root.optJSONObject("result") ?: root.optJSONObject("data") ?: JSONObject()
+        val info = result.optJSONObject("video_info") ?: result
+        val serverQualities = info.toPlaybackQualities()
+        if (dashRequested) {
+            val dash = info.optJSONObject("dash")
+            val tracks = (dash?.optJSONArray("video") ?: JSONArray()).toVideoTracks().map { track ->
+                val support = device.supports(track)
+                track.copy(deviceSupported = support.supported, deviceReason = support.reason)
+            }
+            val audios = buildList {
+                addAll((dash?.optJSONArray("audio") ?: JSONArray()).toAudioTracks())
+                val dolby = dash?.optJSONObject("dolby")?.optJSONArray("audio")
+                if (dolby != null) addAll(dolby.toAudioTracks())
+                val flac = dash?.optJSONObject("flac")?.optJSONObject("audio")
+                if (flac != null) addAll(JSONArray().put(flac).toAudioTracks())
+            }.distinctBy { it.id to it.url }
+            val qualityTracks = PlaybackTrackSelector.selectableTracks(tracks, settings.videoCodec)
+            val qualities = mergeQualities(serverQualities, qualityTracks, device,
+                requireConcreteTrack = settings.videoCodec != AppSettings.VideoCodec.AUTO)
+            val selectedVideo = PlaybackTrackSelector.select(tracks, settings)
+            val selectedAudio = audios.maxByOrNull { it.bandwidth }
+            if (selectedVideo != null && selectedAudio != null) {
+                return PlaySource("", selectedVideo.height.let { qualityLabel(selectedVideo.id, it, selectedVideo.isHdr, selectedVideo.isDolbyVision) },
+                    "video/mp4", selectedVideo, selectedAudio, true, audios.sortedByDescending { it.bandwidth }, qualities,
+                    PlaybackRouteSet.fromUrls(listOf(selectedVideo.url) + selectedVideo.backupUrls, listOf(selectedAudio.url) + selectedAudio.backupUrls))
+            }
+            if (settings.videoCodec != AppSettings.VideoCodec.AUTO) throw BiliApiException(-415, "当前番剧没有可用的${settings.videoCodec.label}轨道，请切换编码或画质")
+            if (tracks.isNotEmpty() && !settings.experimentalQualityEnabled && tracks.none { it.deviceSupported }) {
+                throw BiliApiException(-415, "设备未检测到可播放的番剧画质，可在设置开启实验性高规格播放")
+            }
+        }
+        val first = info.optJSONArray("durl")?.optJSONObject(0)
+        val url = first?.optString("url").orEmpty()
+        if (url.isBlank()) throw BiliApiException(-404, "当前番剧没有可用的播放地址")
+        val route = PlaybackRouteSet.fromUrls(listOf(url) + (first?.optStringArray("backup_url", "backupUrl").orEmpty()))
+        val quality = info.optInt("quality", settings.defaultQuality.takeIf { it > 0 } ?: 80)
+        return PlaySource(url, qualityLabel(quality, 0, quality in HDR_QUALITY_IDS, quality == 126), "video/mp4",
+            availableQualities = serverQualities.map { it.withDevice(device) }, routeSet = route)
+    }
+
+    fun getPgcHistoryPage(cursor: HistoryCursor? = null, expectedAccount: String? = null): PgcHistoryPage {
+        val cookie = credentialStore.readCookie()
+        if (expectedAccount != null && AccountIdentity.fromCookie(cookie) != expectedAccount) throw BiliApiException(-101, "账号已变化，请重新加载")
+        val params = mutableMapOf("ps" to "24", "type" to "archive", "business" to "pgc")
+        cursor?.let { params["max"] = it.max.toString(); params["view_at"] = it.viewAt.toString(); params["business"] = "pgc" }
+        val root = requestRoot(BASE_URL, "/x/web-interface/history/cursor", params, cookie)
+        if (root.optInt("code") != 0) throw BiliApiException(root.optInt("code"), root.optString("message"))
+        val page = PgcJsonParser.parseHistory(root, cursor)
+        val verified = page.entries.mapNotNull { progress ->
+            val ref = progress.playable
+            if (ref.scopeVerified) progress
+            else {
+                val season = pgcScopeCache[ref.seasonId] ?: runCatching { verifyPgcSeasonScope(ref.seasonId) }.getOrNull()
+                season?.takeIf { it.category == ref.category && it.scopeVerified }
+                    ?.let { progress.copy(playable = ref.copy(areas = it.areas, seasonTitle = ref.seasonTitle.ifBlank { it.title }, coverUrl = ref.coverUrl.ifBlank { it.coverUrl })) }
+            }
+        }
+        val resolvedUnknown = page.unclassified.mapNotNull { candidate ->
+            val season = pgcScopeCache[candidate.seasonId] ?: runCatching { verifyPgcSeasonScope(candidate.seasonId) }.getOrNull()
+            season?.takeIf { it.scopeVerified }?.let(candidate::verified)
+        }
+        return page.copy(entries = verified + resolvedUnknown, unclassified = emptyList())
+    }
+
+    private fun verifyPgcSeasonScope(seasonId: Long): PgcSeason {
+        pgcScopeCache[seasonId]?.let { return it }
+        return loadPgcSeasonScope(seasonId)
+    }
+
+    private fun loadPgcSeasonScope(seasonId: Long): PgcSeason {
+        val root = get("/pgc/view/web/season", mapOf("season_id" to seasonId.toString()))
+        val season = PgcJsonParser.parseDetail(root, seasonId).season
+        pgcScopeCache[seasonId] = season
+        return season
+    }
+
     internal fun parsePlayerInfo(root: JSONObject): PlayerInfo {
         val data = root.optJSONObject("data") ?: JSONObject()
         val subtitles = buildList {
@@ -774,6 +1091,174 @@ class BiliApiClient(context: Context) {
         } finally { connection.disconnect() }
     }
 
+    fun getLiveAreas(): List<LiveArea> {
+        val root = liveRequest("/room/v1/Area/getList", emptyMap(), cookie = null)
+        requireLiveSuccess(root)
+        return LiveApiParser.areas(root)
+    }
+
+    fun getLiveRecommendations(): List<LiveRoomSummary> {
+        val root = liveRequest(
+            "/xlive/web-interface/v1/webMain/getMoreRecList",
+            mapOf("platform" to "web", "web_location" to "333.1007"),
+        )
+        requireLiveSuccess(root)
+        // Some response variants omit live_status; the UI resolves those through the
+        // public batch-status endpoint instead of treating omission as proof of live.
+        return LiveApiParser.rooms(root)
+    }
+
+    /** Refreshes saved-room badges in one public batch request; no login cookie is sent. */
+    fun getLiveRoomStatuses(anchorMids: Collection<Long>): Map<Long, LiveRoomSummary> {
+        val mids = anchorMids.asSequence().filter { it > 0L }.distinct().take(50).toList()
+        if (mids.isEmpty()) return emptyMap()
+        val connection = URL("$LIVE_BASE_URL/room/v1/Room/get_status_info_by_uids").openConnection() as HttpURLConnection
+        return try {
+            connection.connectTimeout = 15_000
+            connection.readTimeout = 20_000
+            connection.requestMethod = "POST"
+            connection.doOutput = true
+            connection.setRequestProperty("Accept", "application/json, text/plain, */*")
+            connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+            connection.setRequestProperty("User-Agent", USER_AGENT)
+            connection.setRequestProperty("Referer", LIVE_REFERER)
+            connection.setRequestProperty("Origin", "https://live.bilibili.com")
+            val body = JSONObject().put("uids", JSONArray(mids)).toString().toByteArray(StandardCharsets.UTF_8)
+            connection.outputStream.use { it.write(body) }
+            val response = readResponse(connection)
+            val root = runCatching { JSONObject(response.body) }.getOrElse {
+                throw BiliApiException(response.httpCode, "B 站未返回有效的直播状态数据", response.httpCode)
+            }
+            val code = root.optInt("code", 0)
+            if (response.httpCode !in 200..299 || code != 0) {
+                throw BiliApiException(code.takeIf { it != 0 } ?: response.httpCode, root.optString("message", "直播状态刷新失败"), response.httpCode)
+            }
+            LiveApiParser.roomStatuses(root)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    /** Category ordering is server supplied: live_time (new starts) or online (popularity). */
+    fun getLiveCategoryRooms(parentAreaId: Int, areaId: Int, page: Int = 1, popularity: Boolean = false): List<LiveRoomSummary> {
+        val params = linkedMapOf(
+            "platform" to "web",
+            "parent_area_id" to parentAreaId.toString(),
+            "area_id" to areaId.toString(),
+            "sort_type" to if (popularity) "online" else "live_time",
+            "page" to page.coerceAtLeast(1).toString(),
+            "web_location" to "444.7",
+        )
+        // The current web room-list endpoint requires WBI signing. Calling this endpoint
+        // unsigned used to return -352, which looked like an empty category in the UI.
+        val root = getLiveSigned(
+            "/xlive/web-interface/v1/index/getList",
+            params,
+        )
+        return LiveApiParser.rooms(root)
+    }
+
+    fun searchLiveRooms(keyword: String, page: Int = 1): List<LiveRoomSummary> {
+        val params = linkedMapOf(
+            "search_type" to "live_room",
+            "keyword" to keyword,
+            "page" to page.coerceAtLeast(1).toString(),
+            "page_size" to LIVE_PAGE_SIZE.toString(),
+            "order" to "online",
+            "from_source" to "webtop_search",
+            "platform" to "pc",
+            "highlight" to "1",
+            "single_column" to "0",
+        )
+        val root = getSigned("/x/web-interface/wbi/search/type", params, LIVE_SEARCH_REFERER)
+        val code = root.optInt("code", 0)
+        if (code != 0) throw BiliApiException(code, root.optString("message", "直播搜索失败"))
+        val data = root.optJSONObject("data") ?: return emptyList()
+        val result = data.optJSONObject("result") ?: data
+        return LiveApiParser.rooms(JSONObject().put("data", result))
+    }
+
+    fun getLiveFollowing(): List<LiveRoomSummary> {
+        if (!hasSession()) throw BiliApiException(-101, "登录后才能查看正在直播的关注主播")
+        val root = liveRequest(
+            "/xlive/web-ucenter/v1/xfetter/GetWebList",
+            mapOf("hit_ab" to "false"),
+            referer = LIVE_REFERER,
+        )
+        requireLiveSuccess(root)
+        return LiveApiParser.rooms(root).filter { it.liveStatus == 1 || it.liveStatus == 2 }
+    }
+
+    fun getLiveRoomDetails(inputRoomId: Long): LiveRoomDetails {
+        require(inputRoomId > 0L) { "直播间号无效" }
+        val initRoot = liveRequest("/room/v1/Room/room_init", mapOf("id" to inputRoomId.toString()), cookie = null)
+        requireLiveSuccess(initRoot)
+        val initData = initRoot.optJSONObject("data") ?: throw BiliApiException(-500, "房间初始化数据为空")
+        val realRoomId = initData.optLong("room_id", inputRoomId).takeIf { it > 0L } ?: inputRoomId
+        val infoRoot = liveRequest("/room/v1/Room/get_info", mapOf("room_id" to realRoomId.toString()), cookie = null)
+        requireLiveSuccess(infoRoot)
+        return LiveApiParser.roomDetails(initRoot, infoRoot)
+    }
+
+    fun getLivePlayInfo(
+        roomId: Long,
+        qualityId: Int,
+        protocol: LiveProtocolPreference = LiveProtocolPreference.AUTO,
+        codec: LiveCodecPreference = LiveCodecPreference.AUTO,
+    ): Pair<List<LiveQualityOption>, List<LiveStreamProfile>> {
+        val protocols = when (protocol) {
+            LiveProtocolPreference.AUTO -> "0,1"
+            LiveProtocolPreference.HLS -> "1"
+            LiveProtocolPreference.FLV -> "0"
+        }
+        val formats = when (protocol) {
+            LiveProtocolPreference.AUTO -> "0,1,2"
+            LiveProtocolPreference.HLS -> "1,2"
+            LiveProtocolPreference.FLV -> "0"
+        }
+        val codecs = when (codec) {
+            LiveCodecPreference.AUTO -> "0,1"
+            LiveCodecPreference.AVC -> "0"
+            LiveCodecPreference.HEVC -> "1"
+        }
+        val root = liveRequest(
+            "/xlive/web-room/v2/index/getRoomPlayInfo",
+            mapOf(
+                "room_id" to roomId.toString(),
+                "protocol" to protocols,
+                "format" to formats,
+                "codec" to codecs,
+                "qn" to (qualityId.takeIf { it > 0 } ?: 10_000).toString(),
+                "platform" to "web",
+                "ptype" to "8",
+                "no_playurl" to "0",
+            ),
+            referer = "https://live.bilibili.com/$roomId",
+        )
+        requireLiveSuccess(root)
+        val (qualities, profiles) = LiveApiParser.playInfo(root, qualityId.takeIf { it > 0 } ?: 10_000)
+        if (profiles.isEmpty()) throw BiliApiException(-500, "直播间没有返回可用播放流")
+        return qualities to profiles
+    }
+
+    fun getLiveDanmakuConfig(roomId: Long): LiveDanmakuConfig {
+        val cookie = rankingCookie()
+        val root = getLiveSigned(
+            "/xlive/web-room/v1/index/getDanmuInfo",
+            mapOf("id" to roomId.toString(), "type" to "0", "web_location" to "444.8"),
+            cookie = cookie,
+        )
+        requireLiveSuccess(root)
+        val buvid3 = cookie.orEmpty().split(';')
+            .asSequence()
+            .map(String::trim)
+            .firstOrNull { it.startsWith("buvid3=") }
+            ?.substringAfter('=')
+            .orEmpty()
+        val uid = runCatching { getNavigation().optLong("mid") }.getOrDefault(0L)
+        return LiveApiParser.danmakuConfig(root, buvid3, uid)
+    }
+
     fun getNavigation(): JSONObject = requestRoot("/x/web-interface/nav").optJSONObject("data") ?: JSONObject()
 
     fun generateQrLogin(): QrLoginTicket {
@@ -830,10 +1315,31 @@ class BiliApiClient(context: Context) {
         return response
     }
 
-    private fun getSigned(path: String, params: Map<String, String>): JSONObject {
+    private fun getSigned(path: String, params: Map<String, String>, referer: String? = HOME_REFERER): JSONObject {
         val (imgKey, subKey) = getWbiKeys()
         val signed = BiliWbiSigner.sign(params, imgKey, subKey, System.currentTimeMillis() / 1000)
-        return get(path, signed)
+        return get(path, signed, referer)
+    }
+
+    private fun getLiveSigned(path: String, params: Map<String, String>, cookie: String? = credentialStore.readCookie()): JSONObject {
+        val (imgKey, subKey) = getWbiKeys()
+        val signed = BiliWbiSigner.sign(params, imgKey, subKey, System.currentTimeMillis() / 1000)
+        val root = liveRequest(path, signed, cookie = cookie, referer = LIVE_REFERER)
+        val code = root.optInt("code", 0)
+        if (code != 0) throw BiliApiException(code, root.optString("message", "直播接口请求失败"))
+        return root
+    }
+
+    private fun liveRequest(
+        path: String,
+        params: Map<String, String>,
+        cookie: String? = credentialStore.readCookie(),
+        referer: String? = LIVE_REFERER,
+    ): JSONObject = requestRoot(LIVE_BASE_URL, path, params, cookie, referer)
+
+    private fun requireLiveSuccess(root: JSONObject) {
+        val code = root.optInt("code", 0)
+        if (code != 0) throw BiliApiException(code, root.optString("message", root.optString("msg", "直播接口请求失败")))
     }
 
     private fun getWbiKeys(): Pair<String, String> {
@@ -1026,11 +1532,17 @@ class BiliApiClient(context: Context) {
 
     companion object {
         private const val BASE_URL = "https://api.bilibili.com"
+        private const val LIVE_BASE_URL = "https://api.live.bilibili.com"
         private const val PASSPORT_BASE_URL = "https://passport.bilibili.com"
         private const val DASH_CAPABILITY_FLAGS = 4048
         private val DASH_QUALITY_IDS = setOf(74, 100, 112, 116, 120, 125, 126, 127, 129)
         private val HDR_QUALITY_IDS = setOf(125, 126, 129)
         private const val HOME_REFERER = "https://www.bilibili.com/"
+        private const val SEARCH_REFERER = "https://search.bilibili.com/"
+        private const val LIVE_REFERER = "https://live.bilibili.com/"
+        private const val LIVE_SEARCH_REFERER = "https://search.bilibili.com/live"
+        private const val LIVE_PAGE_SIZE = 20
+        private const val PGC_SCOPE_VERIFY_PARALLELISM = 3
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 13; Tablet) AppleWebKit/537.36 " +
                 "Chrome/131.0.0.0 Mobile Safari/537.36"

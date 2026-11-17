@@ -73,6 +73,11 @@ data class AppSettings(
     val hiddenTopChannels: Set<String> = (ChannelCatalog.keys - ChannelCatalog.defaultPinned.toSet()).toSet(),
     val channelRailOrders: Map<String, List<String>> = emptyMap(),
     val hiddenChannelRails: Set<String> = emptySet(),
+    val liveQualityId: Int = 0,
+    val liveCodecPreference: LiveCodecPreference = LiveCodecPreference.AUTO,
+    val liveProtocolPreference: LiveProtocolPreference = LiveProtocolPreference.AUTO,
+    val liveAutoRecoveryEnabled: Boolean = true,
+    val liveDanmakuEnabled: Boolean = true,
 ) {
     enum class HomeStyle(val storage: String, val label: String) {
         RAILS("rails", "TV 横向轨道"),
@@ -135,6 +140,11 @@ data class AppSettings(
                 channelRailOrders.forEach { (key, value) -> put(key, JSONArray(value)) }
             }.toString())
             .putStringSet("hidden_channel_rails", hiddenChannelRails)
+            .putInt(KEY_LIVE_QUALITY, liveQualityId.coerceAtLeast(0))
+            .putString(KEY_LIVE_CODEC, liveCodecPreference.name)
+            .putString(KEY_LIVE_PROTOCOL, liveProtocolPreference.name)
+            .putBoolean(KEY_LIVE_AUTO_RECOVERY, liveAutoRecoveryEnabled)
+            .putBoolean(KEY_LIVE_DANMAKU, liveDanmakuEnabled)
             .putInt(KEY_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION)
             .apply()
     }
@@ -156,6 +166,11 @@ data class AppSettings(
         private const val KEY_HIDDEN_RAILS = "hidden_rail_keys"
         private const val KEY_RAIL_PREFETCH = "rail_prefetch_enabled"
         private const val KEY_HERO_ENABLED = "hero_enabled"
+        private const val KEY_LIVE_QUALITY = "live_quality_id"
+        private const val KEY_LIVE_CODEC = "live_codec_preference"
+        private const val KEY_LIVE_PROTOCOL = "live_protocol_preference"
+        private const val KEY_LIVE_AUTO_RECOVERY = "live_auto_recovery_enabled"
+        private const val KEY_LIVE_DANMAKU = "live_danmaku_enabled"
         private const val KEY_SCHEMA_VERSION = "settings_schema_version"
         private const val CURRENT_SCHEMA_VERSION = 1
 
@@ -259,6 +274,11 @@ data class AppSettings(
                 hiddenTopChannels = hiddenTopChannels,
                 channelRailOrders = parsedChannelRailOrders,
                 hiddenChannelRails = prefs.getStringSet("hidden_channel_rails", emptySet()).orEmpty().toSet(),
+                liveQualityId = prefs.getInt(KEY_LIVE_QUALITY, 0).coerceAtLeast(0),
+                liveCodecPreference = LiveCodecPreference.entries.firstOrNull { it.name == prefs.getString(KEY_LIVE_CODEC, null) } ?: LiveCodecPreference.AUTO,
+                liveProtocolPreference = LiveProtocolPreference.entries.firstOrNull { it.name == prefs.getString(KEY_LIVE_PROTOCOL, null) } ?: LiveProtocolPreference.AUTO,
+                liveAutoRecoveryEnabled = prefs.getBoolean(KEY_LIVE_AUTO_RECOVERY, true),
+                liveDanmakuEnabled = prefs.getBoolean(KEY_LIVE_DANMAKU, true),
             )
             if (migrating) settings.save(context)
             return settings

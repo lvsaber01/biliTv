@@ -3,8 +3,8 @@ package com.lvsaber.bilitv.ui
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
-import android.graphics.Typeface
 import android.graphics.RectF
+import android.graphics.Typeface
 import android.view.View
 import com.lvsaber.bilitv.data.DanmakuSettings
 
@@ -25,8 +25,12 @@ class DanmakuOverlay(context: Context) : View(context) {
     private data class Placed(val item: DanmakuItem, val lane: Int, val width: Float)
     private var placed: List<Placed> = emptyList()
     private val viewport = RectF()
-    private val videoBounds = RectF()
-    private var hasVideoBounds = false
+    /**
+     * When the XML arrives after playback has already begun (or resumed), do not
+     * paint old comments halfway across the screen as the initial frame. They
+     * remain in [placed], so rewinding can show them again in sync.
+     */
+    private var initialPlaybackFloorMs: Long? = null
     private var laneHeight = 0f
     private var baseline = 0f
     var displaySettings: DanmakuSettings = DanmakuSettings()
@@ -44,24 +48,12 @@ class DanmakuOverlay(context: Context) : View(context) {
             rebuildLayout()
         }
 
-    /**
-     * Uses the actual Media3 surface bounds when available. This avoids putting
-     * danmaku in the full window's top-left letterbox area on non-16:9 videos.
-     */
-    fun setVideoBounds(bounds: RectF?) {
-        if (bounds == null || bounds.width() <= 0f || bounds.height() <= 0f) {
-            if (!hasVideoBounds) return
-            hasVideoBounds = false
-        } else {
-            if (hasVideoBounds && videoBounds == bounds) return
-            videoBounds.set(bounds)
-            hasVideoBounds = true
-        }
-        rebuildLayout()
-    }
     var positionMs: Long = 0L
         set(value) {
             if (field == value) return
+            if (initialPlaybackFloorMs?.let { value < it } == true) {
+                initialPlaybackFloorMs = null
+            }
             field = value
             // Align drawing with display frames instead of invalidating at an
             // arbitrary 100ms timer cadence.
@@ -73,7 +65,8 @@ class DanmakuOverlay(context: Context) : View(context) {
             invalidate()
         }
 
-    fun submit(newItems: List<DanmakuItem>) {
+    fun submit(newItems: List<DanmakuItem>, playbackPositionMs: Long? = null) {
+        initialPlaybackFloorMs = playbackPositionMs?.takeIf { it > 0L }
         items = newItems.sortedBy { it.timeMs }
         rebuildLayout()
     }
@@ -83,13 +76,14 @@ class DanmakuOverlay(context: Context) : View(context) {
         rebuildLayout()
     }
 
-    /** Recompute only for new comments, preferences, or video bounds, never every frame. */
+    /** Recompute only for new comments, preferences, or aspect changes, never every frame. */
     private fun rebuildLayout() {
         viewport.set(0f, 0f, width.toFloat(), height.toFloat())
         if (width <= 0 || height <= 0) { placed = emptyList(); return }
-        if (hasVideoBounds) {
-            viewport.set(videoBounds)
-        } else if (videoAspectRatio > 0) {
+        // Derive the fit viewport from the stable overlay window. Media3's
+        // SurfaceView can be re-laid out while a decoder/stream changes size;
+        // following its transient bounds made the danmaku launch edge drift.
+        if (videoAspectRatio > 0) {
             if (width.toFloat() / height > videoAspectRatio) {
                 val inset = (width - height * videoAspectRatio) / 2
                 viewport.inset(inset, 0f)
@@ -145,12 +139,16 @@ class DanmakuOverlay(context: Context) : View(context) {
         var index = low
         while (index < placed.size && placed[index].item.timeMs <= timeMs && frame.size < displaySettings.maxVisible) {
             val entry = placed[index++]
+            if (isSuppressedAtInitialEntry(entry.item.timeMs, timeMs)) continue
             val elapsed = timeMs - entry.item.timeMs
             frame += FrameItem(entry.item.text, viewport.left + viewport.width() - elapsed.toFloat() / duration * (viewport.width() + entry.width),
                 baseline + laneHeight * entry.lane, entry.item.color)
         }
         return frame
     }
+
+    private fun isSuppressedAtInitialEntry(itemTimeMs: Long, playbackTimeMs: Long): Boolean =
+        initialPlaybackFloorMs?.let { floor -> playbackTimeMs >= floor && itemTimeMs < floor } == true
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
@@ -169,6 +167,7 @@ class DanmakuOverlay(context: Context) : View(context) {
         var visible = 0
         while (index < placed.size && placed[index].item.timeMs <= positionMs && visible < displaySettings.maxVisible) {
             val entry = placed[index++]
+            if (isSuppressedAtInitialEntry(entry.item.timeMs, positionMs)) continue
             val elapsed = positionMs - entry.item.timeMs
             val x = viewport.left + viewport.width() - elapsed.toFloat() / duration * (viewport.width() + entry.width)
             paint.color = entry.item.color

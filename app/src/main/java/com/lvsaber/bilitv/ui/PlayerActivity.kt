@@ -70,6 +70,8 @@ class PlayerActivity : AppCompatActivity() {
     private var codecFallbackButton: android.widget.Button? = null
     private lateinit var actionRail: LinearLayout
     private var chapterButton: android.widget.Button? = null
+    private var speedButton: android.widget.Button? = null
+    private var pgcNextEpisodeButton: android.widget.Button? = null
     private var pgcEpisodeButton: android.widget.Button? = null
     private var pgcPicker: PgcEpisodePickerView? = null
     private lateinit var controls: PlaybackControls
@@ -201,6 +203,20 @@ class PlayerActivity : AppCompatActivity() {
             gravity = android.view.Gravity.CENTER_VERTICAL
             clipChildren = false
         }
+        pgcNextEpisodeButton = actionButton("下一集") {
+            val current = currentPgc
+            if (current == null) return@actionButton
+            if (currentPgcDetail?.season?.seasonId != current.seasonId) {
+                Toast.makeText(this, "正在加载番剧集数，请稍后再试", Toast.LENGTH_SHORT).show()
+            } else if (!playNextPgcEpisode()) {
+                Toast.makeText(this, "本季已是最后一集，可打开选集选择其他季", Toast.LENGTH_LONG).show()
+            }
+        }.also {
+            it.tag = "playback-next-episode"
+            it.contentDescription = "播放下一集"
+            it.visibility = if (currentPgc == null) View.GONE else View.VISIBLE
+        }
+        actionRail.addView(pgcNextEpisodeButton)
         pgcEpisodeButton = actionButton("选集") { showPgcEpisodePicker() }.also {
             it.tag = "playback-episodes"
             it.visibility = if (currentPgc == null) View.GONE else View.VISIBLE
@@ -219,6 +235,15 @@ class PlayerActivity : AppCompatActivity() {
             Toast.makeText(this, if (danmakuOverlay.overlayEnabled) "弹幕已开启" else "弹幕已关闭", Toast.LENGTH_SHORT).show()
         }.apply { tag = "playback-danmaku" }
         actionRail.addView(danmakuButton)
+        speedButton = actionButton("速度 1.0×") { showSpeedChooser() }.apply { tag = "playback-speed" }
+        speedButton?.let(actionRail::addView)
+        actionRail.addView(actionButton("音轨") { showAudioChooser() }.apply { tag = "playback-audio" })
+        actionRail.addView(actionButton("字幕") { showSubtitleChooser() }.apply { tag = "playback-subtitle" })
+        chapterButton = actionButton("章节") { showChapterChooser() }.apply {
+            tag = "playback-chapters"
+            visibility = if (playerInfo.chapters.isEmpty()) View.GONE else View.VISIBLE
+        }
+        chapterButton?.let(actionRail::addView)
 
         val moreActions = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -238,10 +263,6 @@ class PlayerActivity : AppCompatActivity() {
             })
             return button
         }
-        addMoreAction("播放速度", { showSpeedChooser() }, "playback-speed")
-        addMoreAction("音轨", { showAudioChooser() }, "playback-audio")
-        addMoreAction("字幕", { showSubtitleChooser() }, "playback-subtitle")
-        chapterButton = addMoreAction("章节", { showChapterChooser() }, "playback-chapters").apply { visibility = View.GONE }
         addMoreAction("画面比例", { showResizeChooser() }, "playback-resize")
         addMoreAction("弹幕详细设置", {
             startActivity(android.content.Intent(this, SettingsActivity::class.java).putExtra("section", "danmaku"))
@@ -406,6 +427,7 @@ class PlayerActivity : AppCompatActivity() {
         player?.pause()
         controls.updateTitle(currentTitle)
         pgcEpisodeButton?.visibility = View.VISIBLE
+        pgcNextEpisodeButton?.visibility = View.VISIBLE
         closePgcPicker(restorePlayback = false)
         danmakuRequestGeneration++
         danmakuLoading = false
@@ -711,7 +733,10 @@ class PlayerActivity : AppCompatActivity() {
         val labels = options.map { "${it}x" }.toTypedArray()
         showControlDialog(androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("播放速度")
-            .setItems(labels) { _, which -> player?.setPlaybackSpeed(options[which]) }
+            .setItems(labels) { _, which ->
+                player?.setPlaybackSpeed(options[which])
+                speedButton?.text = "速度 ${options[which]}×"
+            }
             .create())
     }
 

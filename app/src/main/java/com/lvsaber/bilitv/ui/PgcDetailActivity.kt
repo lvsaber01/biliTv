@@ -41,6 +41,8 @@ class PgcDetailActivity : AppCompatActivity() {
     private lateinit var episodesList: RecyclerView
     private lateinit var episodesAdapter: EpisodeTiles
     private lateinit var rangeStrip: LinearLayout
+    private var seasonFocusButtons = emptyList<Button>()
+    private var rangeFocusButtons = emptyList<Button>()
     private lateinit var mainPlay: Button
     private lateinit var restartPlay: Button
     private lateinit var followButton: Button
@@ -99,6 +101,8 @@ class PgcDetailActivity : AppCompatActivity() {
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = Ui.pageBackground(context)
+            clipChildren = false
+            clipToPadding = false
             setPadding(Ui.dp(context, 22), Ui.dp(context, 10), Ui.dp(context, 22), Ui.dp(context, 10))
         }
         val heading = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
@@ -140,6 +144,8 @@ class PgcDetailActivity : AppCompatActivity() {
         val hero = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             background = Ui.panel(context)
+            clipChildren = false
+            clipToPadding = false
             setPadding(Ui.dp(context, 12), Ui.dp(context, 10), Ui.dp(context, 12), Ui.dp(context, 10))
         }
         coverView = Ui.poster(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
@@ -171,6 +177,18 @@ class PgcDetailActivity : AppCompatActivity() {
         followButton = Ui.chip(this, "追番", false) { toggleFollow() }
         followButton.isEnabled = false
         if (compact) { followButton.setTextSize(12f); followButton.setPadding(Ui.dp(this, 4), 0, Ui.dp(this, 4), 0) }
+        listOf(mainPlay, restartPlay, followButton).forEach { button ->
+            button.setOnKeyListener { _, keyCode, event ->
+                if (event.action != KeyEvent.ACTION_DOWN || keyCode != KeyEvent.KEYCODE_DPAD_DOWN) return@setOnKeyListener false
+                requestPgcFocus(PgcDetailFocusPolicy.firstSelector(
+                    rangeCount = currentRangeCount(),
+                    seasonCount = detail?.seasons?.size ?: 0,
+                    selectedRange = shownRange,
+                    selectedSeason = selectedSeasonIndex(),
+                ))
+                true
+            }
+        }
         actionRow.addView(mainPlay, LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1f).apply { marginEnd = Ui.dp(this@PgcDetailActivity, 4) })
         actionRow.addView(restartPlay, LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1f).apply { marginStart = Ui.dp(this@PgcDetailActivity, 4); marginEnd = Ui.dp(this@PgcDetailActivity, 4) })
         actionRow.addView(followButton, LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1f).apply { marginStart = Ui.dp(this@PgcDetailActivity, 6) })
@@ -244,6 +262,7 @@ class PgcDetailActivity : AppCompatActivity() {
 
     private fun renderSeasons(seasons: List<PgcSeasonRef>) {
         seasonStrip.removeAllViews()
+        seasonFocusButtons = emptyList()
         if (seasons.size <= 1) {
             seasonStrip.visibility = View.GONE
             return
@@ -251,20 +270,33 @@ class PgcDetailActivity : AppCompatActivity() {
         seasonStrip.visibility = View.VISIBLE
         seasonStrip.addView(Ui.text(this, "选择季", 14f, Ui.muted).apply { setPadding(0, 0, Ui.dp(context, 8), 0) })
         val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        val buttons = mutableListOf<Button>()
         seasons.forEachIndexed { index, season ->
             val button = Ui.chip(this, season.title.ifBlank { "第 ${index + 1} 季" }, season.seasonId == selectedSeasonId) {
                 selectedEpisodeId = 0; shownRange = 0
                 loadSeason(season.seasonId, focusSeason = true)
             }
             button.tag = "pgc-season-${season.seasonId}"
+            button.id = View.generateViewId()
+            button.setOnKeyListener { _, keyCode, event ->
+                val direction = keyDirection(keyCode)
+                if (event.action != KeyEvent.ACTION_DOWN || direction == null) return@setOnKeyListener false
+                requestPgcFocus(PgcDetailFocusPolicy.season(
+                    index, seasons.size, currentRangeCount(), shownRange, direction,
+                ))
+                true
+            }
+            buttons += button
             row.addView(button, LinearLayout.LayoutParams(-2, Ui.dp(this, 36)).apply { marginEnd = Ui.dp(this@PgcDetailActivity, 6) })
         }
+        seasonFocusButtons = buttons
         seasonStrip.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(row) }, LinearLayout.LayoutParams(0, -1, 1f))
     }
 
     private fun renderEpisodes(episodes: List<PgcEpisode>) {
         val ranges = (episodes.indices step 24).toList()
         rangeStrip.removeAllViews()
+        rangeFocusButtons = emptyList()
         if (episodes.size > 24) {
             rangeStrip.addView(Ui.text(this, "集数", 14f, Ui.muted).apply { setPadding(0, 0, Ui.dp(context, 6), 0) })
             val rangeButtons = mutableListOf<Button>()
@@ -274,17 +306,63 @@ class PgcDetailActivity : AppCompatActivity() {
                     shownRange = rangeIndex
                     rangeButtons.forEachIndexed { index, chip -> Ui.setChipSelected(chip, index == shownRange) }
                     episodesAdapter.submit(episodes.subList(start, end), selectedEpisodeId, repository.recentPgc())
-                    episodesList.scrollToPosition(0)
+                    focusEpisodePosition(0)
                 }.apply { tag = "pgc-episode-range-$rangeIndex" }
+                button.id = View.generateViewId()
+                button.setOnKeyListener { _, keyCode, event ->
+                    val direction = keyDirection(keyCode)
+                    if (event.action != KeyEvent.ACTION_DOWN || direction == null) return@setOnKeyListener false
+                    requestPgcFocus(PgcDetailFocusPolicy.range(
+                        rangeIndex, rangeButtons.size, detail?.seasons?.size ?: 0, selectedSeasonIndex(), direction,
+                    ))
+                    true
+                }
                 rangeButtons += button
-                rangeStrip.addView(button)
+                rangeStrip.addView(button, LinearLayout.LayoutParams(-2, Ui.dp(this, 36)).apply {
+                    marginEnd = Ui.dp(this@PgcDetailActivity, 6)
+                })
             }
+            rangeFocusButtons = rangeButtons
         }
         val start = ranges.getOrNull(shownRange) ?: 0
         val end = minOf(start + 24, episodes.size)
         episodesAdapter.submit(episodes.subList(start, end), selectedEpisodeId, repository.recentPgc())
         episodesAdapter.onEpisode = { episode -> selectedEpisodeId = episode.episodeId; updateSelectedEpisodeLabel(episode); playEpisode(episode, restart = false) }
         if (detail?.extraSections?.isNotEmpty() == true) rangeStrip.addView(Ui.chip(this, "PV / 花絮", false) { detail?.let(::showExtras) })
+    }
+
+    private fun currentRangeCount(): Int = detail?.episodes?.let { (it.size + 23) / 24 } ?: 0
+
+    private fun selectedSeasonIndex(): Int = detail?.seasons?.indexOfFirst { it.seasonId == selectedSeasonId }
+        ?.takeIf { it >= 0 } ?: 0
+
+    private fun keyDirection(keyCode: Int): PgcFocusDirection? = when (keyCode) {
+        KeyEvent.KEYCODE_DPAD_LEFT -> PgcFocusDirection.LEFT
+        KeyEvent.KEYCODE_DPAD_RIGHT -> PgcFocusDirection.RIGHT
+        KeyEvent.KEYCODE_DPAD_UP -> PgcFocusDirection.UP
+        KeyEvent.KEYCODE_DPAD_DOWN -> PgcFocusDirection.DOWN
+        else -> null
+    }
+
+    private fun requestPgcFocus(target: PgcDetailFocusTarget): Boolean = when (target) {
+        is PgcDetailFocusTarget.Season -> seasonFocusButtons.getOrNull(target.index)?.requestFocus() ?: mainPlay.requestFocus()
+        is PgcDetailFocusTarget.Range -> rangeFocusButtons.getOrNull(target.index)?.requestFocus()
+            ?: seasonFocusButtons.getOrNull(selectedSeasonIndex())?.requestFocus() ?: mainPlay.requestFocus()
+        is PgcDetailFocusTarget.Episode -> {
+            if (episodesAdapter.itemCount == 0) mainPlay.requestFocus()
+            else { focusEpisodePosition(target.index.coerceIn(0, episodesAdapter.itemCount - 1)); true }
+        }
+        PgcDetailFocusTarget.Play -> mainPlay.requestFocus()
+        PgcDetailFocusTarget.Stay -> true
+    }
+
+    private fun focusEpisodePosition(position: Int) {
+        if (episodesAdapter.itemCount == 0) return
+        val target = position.coerceIn(0, episodesAdapter.itemCount - 1)
+        episodesList.post {
+            episodesList.scrollToPosition(target)
+            episodesList.post { episodesList.findViewHolderForAdapterPosition(target)?.itemView?.requestFocus() }
+        }
     }
 
     private fun updateSelectedEpisodeLabel(episode: PgcEpisode) {
@@ -414,7 +492,10 @@ class PgcDetailActivity : AppCompatActivity() {
         }
         override fun getItemCount() = items.size
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PgcEpisodeHolder = PgcEpisodeHolder(Ui.chip(parent.context, "", false) {}.apply {
-            layoutParams = RecyclerView.LayoutParams(-1, Ui.dp(parent.context, 58)).apply { setMargins(4, 4, 4, 4) }
+            layoutParams = RecyclerView.LayoutParams(-1, Ui.dp(parent.context, 58)).apply {
+                val gap = Ui.dp(parent.context, 6)
+                setMargins(gap, gap, gap, gap)
+            }
             gravity = Gravity.CENTER
             maxLines = 2
             textSize = 14f
@@ -437,19 +518,20 @@ class PgcDetailActivity : AppCompatActivity() {
                 if (focused) focusedEpisodeId = episode.episodeId
             }
             holder.label.setOnKeyListener { _, keyCode, event ->
-                if (event.action != KeyEvent.ACTION_DOWN || keyCode !in listOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)) return@setOnKeyListener false
+                val direction = keyDirection(keyCode)
+                if (event.action != KeyEvent.ACTION_DOWN || direction == null) return@setOnKeyListener false
                 val columns = (episodesList.layoutManager as? GridLayoutManager)?.spanCount ?: 8
-                val target = when (keyCode) {
-                    KeyEvent.KEYCODE_DPAD_LEFT -> position - 1
-                    KeyEvent.KEYCODE_DPAD_RIGHT -> position + 1
-                    KeyEvent.KEYCODE_DPAD_UP -> position - columns
-                    else -> position + columns
-                }
-                if (target in items.indices) {
-                    episodesList.findViewHolderForAdapterPosition(target)?.itemView?.requestFocus()
-                    if (episodesList.findViewHolderForAdapterPosition(target) == null) episodesList.post { episodesList.findViewHolderForAdapterPosition(target)?.itemView?.requestFocus() }
-                    true
-                } else false
+                val target = PgcDetailFocusPolicy.episode(
+                    index = position,
+                    itemCount = items.size,
+                    columns = columns,
+                    direction = direction,
+                    rangeCount = currentRangeCount(),
+                    seasonCount = detail?.seasons?.size ?: 0,
+                    selectedRange = shownRange,
+                    selectedSeason = selectedSeasonIndex(),
+                )
+                requestPgcFocus(target)
             }
         }
     }

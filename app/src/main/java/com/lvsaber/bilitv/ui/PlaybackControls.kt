@@ -43,16 +43,25 @@ class PlaybackControls(
     private var seekKey = 0
     private var lastSeekStep = 0L
     private var fading = false
+    private var seekOverlay = false
     private val hideTask = Runnable { hideControls() }
     private val commitTask = Runnable { commitSeek() }
+    private val settleSeekTask = Runnable { if (seekOverlay && playing) hideControls() }
     private val playButton: Button
+    private val rewindButton: Button
+    private val forwardButton: Button
+    private lateinit var transport: LinearLayout
     private val progress: SeekBar
     private val time: TextView
     private val totalTime: TextView
     private val hint: TextView
+    private lateinit var seekReadout: TextView
     private lateinit var titleLabel: TextView
     private lateinit var qualityBadge: TextView
     private lateinit var bottomPanel: LinearLayout
+    private lateinit var topScrim: View
+    private lateinit var bottomScrim: View
+    private lateinit var pauseScrim: View
     private var optionsPanel: LinearLayout? = null
     private var optionsCloseButton: Button? = null
     val morePanelVisible: Boolean get() = optionsPanel?.visibility == View.VISIBLE
@@ -64,7 +73,13 @@ class PlaybackControls(
         clipChildren = false
         clipToPadding = false
         setOnClickListener { toggleVisibility() }
-        val topScrim = View(context).apply {
+        pauseScrim = View(context).apply {
+            setBackgroundColor(0x55000000)
+            visibility = View.GONE
+            isFocusable = false
+        }
+        addView(pauseScrim, LayoutParams(-1, -1))
+        topScrim = View(context).apply {
             isFocusable = false
             background = android.graphics.drawable.GradientDrawable(
                 android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
@@ -99,7 +114,7 @@ class PlaybackControls(
             topMargin = Ui.dp(context, 14)
         })
 
-        val bottomScrim = View(context).apply {
+        bottomScrim = View(context).apply {
             isFocusable = false
             background = android.graphics.drawable.GradientDrawable(
                 android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
@@ -108,25 +123,43 @@ class PlaybackControls(
         }
         addView(bottomScrim, LayoutParams(-1, Ui.dp(context, 238), Gravity.BOTTOM))
 
-        val transport = LinearLayout(context).apply {
+        transport = LinearLayout(context).apply {
             gravity = Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.HORIZONTAL
             clipChildren = false
+            background = Ui.roundedBackground(0x66101820, Ui.dp(context, 42))
+            setPadding(Ui.dp(context, 8), Ui.dp(context, 8), Ui.dp(context, 8), Ui.dp(context, 8))
         }
-        transport.addView(Ui.chip(context, "↶ 10秒", false) { stepSeek(-1); commitSeek() }.apply {
-            setTextSize(13f)
-        }, LinearLayout.LayoutParams(-2, Ui.dp(context, 46)))
+        rewindButton = Ui.chip(context, "↶", false) { stepSeek(-1); commitSeek() }.apply {
+            contentDescription = "快退 10 秒"
+            setTextSize(25f)
+            minWidth = 0
+            setPadding(0, 0, 0, 0)
+            background = Ui.roundedBackground(0x991B2732.toInt(), Ui.dp(context, 32))
+        }
+        transport.addView(rewindButton, LinearLayout.LayoutParams(Ui.dp(context, 62), Ui.dp(context, 62)).apply {
+            marginEnd = Ui.dp(context, 10)
+        })
         playButton = Ui.chip(context, "暂停", false) { performToggle() }.apply {
             tag = "playback-toggle"
-            setTextSize(22f)
+            contentDescription = "播放或暂停"
+            setTextSize(28f)
+            minWidth = 0
+            setPadding(0, 0, 0, 0)
             setTextColor(Color.WHITE)
-            background = Ui.roundedBackground(0xC91C2934.toInt(), Ui.dp(context, 25))
+            background = Ui.roundedBackground(0xD91C2934.toInt(), Ui.dp(context, 38))
         }
-        transport.addView(playButton, LinearLayout.LayoutParams(Ui.dp(context, 58), Ui.dp(context, 54)).apply {
-            marginStart = Ui.dp(context, 10); marginEnd = Ui.dp(context, 10)
+        transport.addView(playButton, LinearLayout.LayoutParams(Ui.dp(context, 76), Ui.dp(context, 76)).apply {
+            marginEnd = Ui.dp(context, 10)
         })
-        transport.addView(Ui.chip(context, "10秒 ↷", false) { stepSeek(1); commitSeek() }.apply {
-            setTextSize(13f)
-        }, LinearLayout.LayoutParams(-2, Ui.dp(context, 46)))
+        forwardButton = Ui.chip(context, "↷", false) { stepSeek(1); commitSeek() }.apply {
+            contentDescription = "快进 10 秒"
+            setTextSize(25f)
+            minWidth = 0
+            setPadding(0, 0, 0, 0)
+            background = Ui.roundedBackground(0x991B2732.toInt(), Ui.dp(context, 32))
+        }
+        transport.addView(forwardButton, LinearLayout.LayoutParams(Ui.dp(context, 62), Ui.dp(context, 62)))
 
         bottomPanel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -136,7 +169,7 @@ class PlaybackControls(
                 intArrayOf(Color.TRANSPARENT, 0xA80A0D12.toInt(), 0xE80A0D12.toInt()),
             )
         }
-        hint = Ui.text(context, "左右快退/快进 10 秒 · 确认播放/暂停 · 上键打开常用设置", 12f, Ui.muted).apply {
+        hint = Ui.text(context, "左右快退/快进 10 秒 · 下键进入播放选项 · 返回收起控制", 12f, Ui.muted).apply {
             setPadding(Ui.dp(context, 2), 0, Ui.dp(context, 2), Ui.dp(context, 3))
         }
         bottomPanel.addView(hint, LinearLayout.LayoutParams(-1, Ui.dp(context, 22)))
@@ -172,18 +205,30 @@ class PlaybackControls(
         bottomPanel.addView(timeline, LinearLayout.LayoutParams(-1, Ui.dp(context, 38)))
 
         val controlsRow = LinearLayout(context).apply {
-            gravity = Gravity.CENTER_VERTICAL
+            gravity = Gravity.CENTER
             clipChildren = false
             setPadding(0, Ui.dp(context, 6), 0, 0)
         }
-        controlsRow.addView(transport, LinearLayout.LayoutParams(-2, Ui.dp(context, 58)))
-        controlsRow.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
         actions.orientation = LinearLayout.HORIZONTAL
         actions.gravity = Gravity.CENTER_VERTICAL
         actions.setPadding(0, 0, 0, 0)
-        controlsRow.addView(actions, LinearLayout.LayoutParams(-2, Ui.dp(context, 58)))
+        val actionScroll = HorizontalScrollView(context).apply {
+            isHorizontalScrollBarEnabled = false
+            descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+            addView(actions, LinearLayout.LayoutParams(-2, Ui.dp(context, 58)))
+        }
+        controlsRow.addView(actionScroll, LinearLayout.LayoutParams(-1, Ui.dp(context, 58)))
         bottomPanel.addView(controlsRow, LinearLayout.LayoutParams(-1, Ui.dp(context, 64)))
         addView(bottomPanel, LayoutParams(-1, -2, Gravity.BOTTOM))
+        addView(transport, LayoutParams(-2, -2, Gravity.CENTER))
+        seekReadout = Ui.text(context, "", 14f, Color.WHITE).apply {
+            gravity = Gravity.CENTER
+            background = Ui.roundedBackground(0xCC101820.toInt(), Ui.dp(context, 18))
+            setPadding(Ui.dp(context, 14), Ui.dp(context, 4), Ui.dp(context, 14), Ui.dp(context, 4))
+            visibility = View.GONE
+            isFocusable = false
+        }
+        addView(seekReadout, LayoutParams(-2, Ui.dp(context, 34), Gravity.CENTER).apply { topMargin = Ui.dp(context, 112) })
 
         moreActions?.let { menuActions ->
             menuActions.orientation = LinearLayout.VERTICAL
@@ -231,6 +276,7 @@ class PlaybackControls(
             optionsCloseButton?.nextFocusDownId = menuActions.getChildAt(0)?.id ?: View.NO_ID
             menuActions.getChildAt(0)?.nextFocusUpId = optionsCloseButton?.id ?: View.NO_ID
         }
+        updateLayerVisibility()
     }
 
     fun update(position: Long, duration: Long, isPlaying: Boolean, isReady: Boolean) {
@@ -240,7 +286,10 @@ class PlaybackControls(
         playing = isPlaying; ready = isReady
         playButton.text = if (playing) "Ⅱ" else "▶"
         playButton.contentDescription = if (playing) "暂停播放" else "继续播放"
+        rewindButton.isEnabled = ready && durationMs > 0
+        forwardButton.isEnabled = ready && durationMs > 0
         if (changed) resetHideTimer()
+        updateLayerVisibility()
         renderProgress()
     }
 
@@ -252,33 +301,68 @@ class PlaybackControls(
         val value = seekTarget ?: positionMs
         time.text = WatchProgress.formatPosition(value)
         totalTime.text = if (durationMs > 0) WatchProgress.formatPosition(durationMs) else "--:--"
+        seekReadout.text = "${WatchProgress.formatPosition(value)}  /  ${if (durationMs > 0) WatchProgress.formatPosition(durationMs) else "--:--"}"
         progress.contentDescription = "播放进度 ${WatchProgress.formatPosition(value)}"
         progress.isEnabled = ready && durationMs > 0
         if (!dragging) progress.progress = if (durationMs > 0) (value * 10000 / durationMs).toInt().coerceIn(0, 10000) else 0
-        hint.text = if (seekTarget != null) "定位到 ${WatchProgress.formatPosition(value)} · 松开方向键跳转" else "左右快退/快进 10 秒 · 确认播放/暂停 · 上键设置 · 返回隐藏"
+        hint.text = if (seekTarget != null) "定位到 ${WatchProgress.formatPosition(value)} · 松开方向键跳转" else "左右快退/快进 10 秒 · 下键打开选项 · 返回收起"
     }
 
     private fun resetHideTimer() {
         handler.removeCallbacks(hideTask)
-        if (controlsVisible && playing && ready && !suspended && !dialogOpen && !morePanelVisible && !dragging && seekTarget == null) handler.postDelayed(hideTask, 5000)
+        if (controlsVisible && playing && ready && !suspended && !dialogOpen && !morePanelVisible && !dragging && seekTarget == null) {
+            handler.postDelayed(hideTask, if (seekOverlay) 1_500 else 5_000)
+        }
     }
 
-    fun showControls(focusTransport: Boolean = true) {
+    fun showControls(focusTransport: Boolean = false) {
         animate().cancel(); fading = false
+        handler.removeCallbacks(settleSeekTask)
+        seekOverlay = false
         controlsVisible = true; visibility = VISIBLE; alpha = 1f
         descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
         if (focusTransport) playButton.requestFocus()
+        updateLayerVisibility()
         resetHideTimer()
+    }
+
+    private fun showSeekControls() {
+        animate().cancel(); fading = false
+        controlsVisible = true
+        seekOverlay = true
+        visibility = VISIBLE; alpha = 1f
+        descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        updateLayerVisibility()
+        handler.removeCallbacks(hideTask)
+        handler.removeCallbacks(settleSeekTask)
+    }
+
+    private fun updateLayerVisibility() {
+        if (!::bottomPanel.isInitialized) return
+        val fullLayer = controlsVisible && !seekOverlay
+        pauseScrim.visibility = if (fullLayer && ready && !playing) VISIBLE else GONE
+        topScrim.visibility = if (fullLayer) VISIBLE else GONE
+        bottomScrim.visibility = if (fullLayer) VISIBLE else GONE
+        bottomPanel.visibility = if (fullLayer) VISIBLE else GONE
+        transport.visibility = if (controlsVisible) VISIBLE else GONE
+        seekReadout.visibility = if (controlsVisible && seekOverlay) VISIBLE else GONE
     }
 
     fun hideControls() {
         if (morePanelVisible) closeOptionsPanel(restoreFocus = false)
         commitSeek()
         handler.removeCallbacks(hideTask)
+        handler.removeCallbacks(settleSeekTask)
         if (!controlsVisible) return
         controlsVisible = false
+        seekOverlay = false
         descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         clearFocus(); focusVideo()
+        pauseScrim.visibility = GONE
+        topScrim.visibility = GONE
+        bottomScrim.visibility = GONE
+        bottomPanel.visibility = GONE
+        transport.visibility = GONE
         fading = true
         animate().alpha(0f).setDuration(180).withEndAction {
             if (fading) { visibility = GONE; fading = false }
@@ -313,12 +397,16 @@ class PlaybackControls(
     }
 
     private fun performToggle() {
-        commitSeek(); showControls(); togglePlayback()
+        commitSeek(); showControls(focusTransport = true); togglePlayback()
     }
 
     private fun stepSeek(direction: Int) {
-        showControls()
-        if (!ready || durationMs <= 0) { hint.text = "正在准备视频，暂时无法跳转"; return }
+        if (!ready || durationMs <= 0) {
+            showControls(focusTransport = false)
+            hint.text = "正在准备视频，暂时无法跳转"
+            return
+        }
+        showSeekControls()
         seekTarget = ((seekTarget ?: positionMs) + direction * 10000L).coerceIn(0, durationMs)
         handler.removeCallbacks(hideTask)
         handler.removeCallbacks(commitTask)
@@ -333,7 +421,11 @@ class PlaybackControls(
         seekTarget = null; seekKey = 0
         positionMs = target
         seekPlayback(target)
-        renderProgress(); resetHideTimer()
+        renderProgress()
+        if (seekOverlay && playing) {
+            handler.removeCallbacks(settleSeekTask)
+            handler.postDelayed(settleSeekTask, 1_500)
+        } else resetHideTimer()
     }
 
     /** Caller excludes its error overlay; dialogs receive their own window events. */
@@ -375,6 +467,7 @@ class PlaybackControls(
         }
         if (event.action != KeyEvent.ACTION_DOWN) return true
         val inActions = controlsVisible && isInside(focused, actions)
+        val inTransport = controlsVisible && isInside(focused, transport)
         if (media) {
             if (event.repeatCount == 0) {
                 if (code == KeyEvent.KEYCODE_MEDIA_PLAY && !playing || code == KeyEvent.KEYCODE_MEDIA_PAUSE && playing || code == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) performToggle()
@@ -383,7 +476,7 @@ class PlaybackControls(
         }
         if (center) {
             if (event.repeatCount == 0) {
-                if (inActions) { resetHideTimer(); focused?.performClick() } else performToggle()
+                if (inActions || inTransport) { resetHideTimer(); focused?.performClick() } else performToggle()
             }
         } else if (horizontal) {
             if (inActions) {
@@ -396,6 +489,12 @@ class PlaybackControls(
                     nextIndex += direction
                 }
                 resetHideTimer()
+            } else if (inTransport) {
+                val transportButtons = listOf(rewindButton, playButton, forwardButton)
+                val current = transportButtons.indexOf(focused)
+                val next = current + if (code == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1
+                if (next in transportButtons.indices) transportButtons[next].requestFocus()
+                resetHideTimer()
             } else {
                 val now = SystemClock.uptimeMillis()
                 if (event.repeatCount == 0 || now - lastSeekStep >= 150) {
@@ -405,7 +504,7 @@ class PlaybackControls(
             }
         } else if (vertical && event.repeatCount == 0) {
             commitSeek(); showControls(false)
-            if (code == KeyEvent.KEYCODE_DPAD_UP) {
+            if (code == KeyEvent.KEYCODE_DPAD_DOWN) {
                 (rememberedAvailableAction() ?: firstAvailableAction())?.requestFocus() ?: playButton.requestFocus()
             } else playButton.requestFocus()
         }

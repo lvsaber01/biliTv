@@ -32,8 +32,6 @@ object Ui {
     val blue = Color.rgb(85, 210, 244)
     val pink = Color.rgb(251, 114, 153)
     private val primaryText = Color.rgb(10, 32, 43)
-    private val zoneSurface = Color.argb(20, 255, 255, 255)
-    private val zoneSelected = Color.rgb(223, 248, 255)
 
     fun dp(context: Context, value: Int): Int =
         (value * context.resources.displayMetrics.density).toInt()
@@ -93,6 +91,15 @@ object Ui {
         focusHighlight(this)
     }
 
+    /** Compact, readable top-level navigation shared by the three content zones. */
+    fun navigationButton(context: Context, label: String, onClick: () -> Unit): Button =
+        chip(context, label, false, onClick).apply {
+            setTextSize(15f)
+            minHeight = dp(context, 42)
+            minWidth = 0
+            setPadding(dp(context, 10), 0, dp(context, 10), 0)
+        }
+
     fun setChipSelected(button: android.widget.Button, selected: Boolean) {
         button.setTextColor(if (selected) Color.WHITE else muted)
         button.background = roundedBackground(
@@ -102,53 +109,6 @@ object Ui {
             setStroke(dp(button.context, 1), if (selected) Color.argb(145, Color.red(blue), Color.green(blue), Color.blue(blue)) else divider)
         }
         button.isSelected = selected
-    }
-
-    /** Segmented top-level destinations used by video, bangumi, and live shells. */
-    fun zoneSwitch(context: Context, selected: String, onSelect: (String) -> Unit): LinearLayout =
-        LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = roundedBackground(zoneSurface, dp(context, 14)).apply {
-                setStroke(dp(context, 1), divider)
-            }
-            setPadding(dp(context, 3), dp(context, 3), dp(context, 3), dp(context, 3))
-            tag = "zone-switch"
-            listOf("video" to "视频", "bangumi" to "番剧", "live" to "直播").forEach { (key, label) ->
-                val button = Button(context).apply {
-                    text = label
-                    tag = "zone/$key"
-                    textSize = 13f
-                    isAllCaps = false
-                    minWidth = dp(context, 58)
-                    minHeight = dp(context, 38)
-                    setPadding(dp(context, 11), 0, dp(context, 11), 0)
-                    isFocusable = true
-                    isClickable = true
-                    setOnClickListener { onSelect(key) }
-                    focusHighlight(this)
-                }
-                setZoneSelected(button, key == selected)
-                addView(button, LinearLayout.LayoutParams(-2, dp(context, 38)).apply {
-                    if (childCount > 0) marginStart = dp(context, 2)
-                })
-            }
-        }
-
-    fun setZoneSwitchSelection(group: android.view.ViewGroup, selected: String) {
-        for (index in 0 until group.childCount) {
-            val button = group.getChildAt(index) as? Button ?: continue
-            setZoneSelected(button, button.tag?.toString() == "zone/$selected")
-        }
-    }
-
-    private fun setZoneSelected(button: Button, selected: Boolean) {
-        button.isSelected = selected
-        button.setTextColor(if (selected) primaryText else muted)
-        button.background = roundedBackground(
-            if (selected) zoneSelected else Color.TRANSPARENT,
-            dp(button.context, 10),
-        )
     }
 
     fun searchInput(context: Context, hint: String): EditText = EditText(context).apply {

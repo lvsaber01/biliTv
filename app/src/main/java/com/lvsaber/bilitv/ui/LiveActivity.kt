@@ -40,7 +40,6 @@ class LiveActivity : AppCompatActivity() {
     private lateinit var library: LiveLibraryRepository
     private lateinit var content: FrameLayout
     private lateinit var zoneButton: Button
-    private var zoneSwitchView: LinearLayout? = null
     private lateinit var navStrip: LinearLayout
     private lateinit var navScroll: HorizontalScrollView
     private val navButtons = linkedMapOf<String, Button>()
@@ -70,6 +69,7 @@ class LiveActivity : AppCompatActivity() {
     private var categoryRefreshButton: Button? = null
     private var upperContentFocus: View? = null
     private var filterOverlay: View? = null
+    private var filterInitialFocus: View? = null
     private var previousSession = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -116,6 +116,22 @@ class LiveActivity : AppCompatActivity() {
             outState.putString(STATE_FOCUS_TAG, it.focusTag)
         }
         super.onSaveInstanceState(outState)
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val overlay = filterOverlay
+        val isDpad = event.keyCode in setOf(
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
+        )
+        if (overlay != null && isDpad && event.action == KeyEvent.ACTION_DOWN &&
+            currentFocus?.let { isWithin(overlay, it) } != true
+        ) {
+            filterInitialFocus?.requestFocus() ?: overlay.requestFocus()
+            return true
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onResume() {
@@ -185,13 +201,8 @@ class LiveActivity : AppCompatActivity() {
             root.addView(toolbar, FrameLayout.LayoutParams(-1, Ui.dp(this, 100)).apply { topMargin = Ui.dp(this@LiveActivity, 14) })
         } else {
             toolbar.addView(logo, LinearLayout.LayoutParams(Ui.dp(this, 96), Ui.dp(this, 58)))
-            zoneSwitchView = Ui.zoneSwitch(this, "live", ::openZone).apply {
-                layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(this@LiveActivity, 48)).apply {
-                    marginStart = Ui.dp(this@LiveActivity, 6)
-                    marginEnd = Ui.dp(this@LiveActivity, 6)
-                }
-            }
-            toolbar.addView(zoneSwitchView)
+            zoneButton.text = "专区：直播 ▾"
+            toolbar.addView(zoneButton)
             toolbar.addView(navScroll, LinearLayout.LayoutParams(0, Ui.dp(this, 58), 1f))
             fixed.forEach { (key, label) ->
                 val button = navButton(label) { openGlobalPage(key) }
@@ -204,7 +215,7 @@ class LiveActivity : AppCompatActivity() {
         return root
     }
 
-    private fun navButton(label: String, action: () -> Unit): Button = Ui.chip(this, label, false, action).apply {
+    private fun navButton(label: String, action: () -> Unit): Button = Ui.navigationButton(this, label, action).apply {
         Ui.focusHighlight(this)
         background = Ui.roundedBackground(android.graphics.Color.TRANSPARENT, Ui.dp(context, 12))
         layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(this@LiveActivity, 42)).apply { marginStart = Ui.dp(this@LiveActivity, 5) }
@@ -233,21 +244,12 @@ class LiveActivity : AppCompatActivity() {
     }
 
     private fun updateNavigation() {
-        zoneSwitchView?.let { Ui.setZoneSwitchSelection(it, "live") }
         (navButtons + fixedButtons).forEach { (key, button) ->
             val selected = key == pageKey
             button.setTextColor(if (selected) android.graphics.Color.WHITE else Ui.muted)
             button.background = Ui.roundedBackground(if (selected) 0x27FFFFFF else android.graphics.Color.TRANSPARENT, Ui.dp(this, 12))
         }
         zoneButton.text = "专区：直播 ▾"
-    }
-
-    private fun openZone(zone: String) {
-        when (zone) {
-            "video" -> startActivity(Intent(this, MainActivity::class.java))
-            "bangumi" -> startActivity(Intent(this, BangumiActivity::class.java))
-            "live" -> showPage(PAGE_RECOMMEND)
-        }
     }
 
     private fun showZoneChooser() {
@@ -414,6 +416,42 @@ class LiveActivity : AppCompatActivity() {
             setPadding(Ui.dp(context, 16), Ui.dp(context, 12), Ui.dp(context, 16), Ui.dp(context, 12))
         }
         panel.addView(Ui.text(this, "选择直播分区", 18f, Ui.text), LinearLayout.LayoutParams(-1, Ui.dp(this, 34)))
+        var filterEntryFocus: View? = null
+        val actions = LinearLayout(this).apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL }
+        val cancelButton = Ui.secondaryButton(this, "取消") { closeAreaFilterPanel() }.apply {
+            tag = "live-filter-cancel"
+            layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(this@LiveActivity, 48))
+        }
+        val applyButton = Ui.button(this, "应用") {
+            selectedParentId = pendingParentId
+            selectedAreaId = pendingAreaId.takeIf { candidate ->
+                candidate == 0 || areas.any { it.areaId == candidate && (pendingParentId == 0 || it.parentId == pendingParentId) }
+            } ?: 0
+            updateCategoryFilterLabel()
+            closeAreaFilterPanel()
+            loadCategoryRooms(reset = true)
+        }.apply {
+            tag = "live-filter-apply"
+            layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(this@LiveActivity, 48)).apply { marginStart = Ui.dp(this@LiveActivity, 8) }
+        }
+        listOf(cancelButton, applyButton).forEach { button ->
+            button.setOnKeyListener { _, keyCode, event ->
+                if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_LEFT -> { cancelButton.requestFocus(); true }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> { applyButton.requestFocus(); true }
+                    KeyEvent.KEYCODE_DPAD_DOWN -> { filterEntryFocus?.requestFocus() == true }
+                    KeyEvent.KEYCODE_DPAD_UP -> true
+                    else -> false
+                }
+            }
+        }
+        actions.addView(cancelButton)
+        actions.addView(applyButton)
+        panel.addView(actions, LinearLayout.LayoutParams(-1, Ui.dp(this, 52)).apply {
+            topMargin = Ui.dp(this@LiveActivity, 4)
+            bottomMargin = Ui.dp(this@LiveActivity, 4)
+        })
         val columns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; weightSum = 2f }
         val parentHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val childHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -449,11 +487,38 @@ class LiveActivity : AppCompatActivity() {
             val all = Ui.chip(this, "全部", pendingAreaId == 0) { selectChild(0) }
             all.tag = "live-filter-child/0"
             all.setOnKeyListener { _, keyCode, event ->
-                if (event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
-                    focusedParent?.requestFocus(); true
-                } else false
+                if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                val index = childButtons.indexOfFirst { it.second === all }
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_LEFT -> { focusedParent?.requestFocus(); true }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> true
+                    KeyEvent.KEYCODE_DPAD_UP -> {
+                        when (val target = LiveFilterFocusPolicy.child(
+                            index, childButtons.size,
+                            parentEntries.indexOfFirst { it.first == pendingParentId }.coerceAtLeast(0),
+                            PgcFocusDirection.UP,
+                        )) {
+                            is LiveFilterFocusTarget.Child -> childButtons.getOrNull(target.index)?.second?.requestFocus()
+                            is LiveFilterFocusTarget.Parent -> focusedParent?.requestFocus()
+                            else -> Unit
+                        }
+                        true
+                    }
+                    KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        when (val target = LiveFilterFocusPolicy.child(
+                            index, childButtons.size,
+                            parentEntries.indexOfFirst { it.first == pendingParentId }.coerceAtLeast(0),
+                            PgcFocusDirection.DOWN,
+                        )) {
+                            is LiveFilterFocusTarget.Child -> childButtons.getOrNull(target.index)?.second?.requestFocus()
+                            else -> Unit
+                        }
+                        true
+                    }
+                    else -> false
+                }
             }
-            childHost.addView(all, LinearLayout.LayoutParams(-1, Ui.dp(this, 38)).apply { bottomMargin = Ui.dp(this@LiveActivity, 4) })
+            childHost.addView(all, LinearLayout.LayoutParams(-1, Ui.dp(this, 48)).apply { bottomMargin = Ui.dp(this@LiveActivity, 4) })
             childButtons += 0 to all
             if (pendingAreaId == 0) selectedChildButton = all
             areas.filter { pendingParentId == 0 || it.parentId == pendingParentId }
@@ -462,51 +527,93 @@ class LiveActivity : AppCompatActivity() {
                     val button = Ui.chip(this, area.areaName, area.areaId == pendingAreaId) { selectChild(area.areaId) }
                     button.tag = "live-filter-child/${area.areaId}"
                     button.setOnKeyListener { _, keyCode, event ->
-                        if (event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
-                            focusedParent?.requestFocus(); true
-                        } else false
+                        if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                        val index = childButtons.indexOfFirst { it.second === button }
+                        when (keyCode) {
+                            KeyEvent.KEYCODE_DPAD_LEFT -> { focusedParent?.requestFocus(); true }
+                            KeyEvent.KEYCODE_DPAD_RIGHT -> true
+                            KeyEvent.KEYCODE_DPAD_UP -> {
+                                when (val target = LiveFilterFocusPolicy.child(
+                                    index, childButtons.size,
+                                    parentEntries.indexOfFirst { it.first == pendingParentId }.coerceAtLeast(0),
+                                    PgcFocusDirection.UP,
+                                )) {
+                                    is LiveFilterFocusTarget.Child -> childButtons.getOrNull(target.index)?.second?.requestFocus()
+                                    is LiveFilterFocusTarget.Parent -> focusedParent?.requestFocus()
+                                    else -> Unit
+                                }
+                                true
+                            }
+                            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                                when (val target = LiveFilterFocusPolicy.child(
+                                    index, childButtons.size,
+                                    parentEntries.indexOfFirst { it.first == pendingParentId }.coerceAtLeast(0),
+                                    PgcFocusDirection.DOWN,
+                                )) {
+                                    is LiveFilterFocusTarget.Child -> childButtons.getOrNull(target.index)?.second?.requestFocus()
+                                    else -> Unit
+                                }
+                                true
+                            }
+                            else -> false
+                        }
                     }
-                    childHost.addView(button, LinearLayout.LayoutParams(-1, Ui.dp(this, 38)).apply { bottomMargin = Ui.dp(this@LiveActivity, 4) })
+                    childHost.addView(button, LinearLayout.LayoutParams(-1, Ui.dp(this, 48)).apply { bottomMargin = Ui.dp(this@LiveActivity, 4) })
                     childButtons += area.areaId to button
                     if (area.areaId == pendingAreaId) selectedChildButton = button
                 }
         }
-        parentEntries.forEach { entry ->
-            val id = entry.first
-            val button = Ui.chip(this, entry.second, id == pendingParentId) {
+        fun focusParent(id: Int, button: Button, resetChild: Boolean = false) {
+            focusedParent = button
+            filterEntryFocus = button
+            if (resetChild || pendingParentId != id) {
                 pendingParentId = id
                 pendingAreaId = 0
-                parentButtons.forEach { (candidate, chip) -> Ui.setChipSelected(chip, candidate == pendingParentId) }
+                parentButtons.forEach { (candidate, chip) -> Ui.setChipSelected(chip, candidate == id) }
                 renderChildren()
-                focusedParent = parentButtons[id]
-                focusedParent?.requestFocus()
+            }
+        }
+        parentEntries.forEach { entry ->
+            val id = entry.first
+            lateinit var button: Button
+            button = Ui.chip(this, entry.second, id == pendingParentId) {
+                focusParent(id, button, resetChild = true)
             }
             button.tag = "live-filter-parent/$id"
-            button.setOnKeyListener { _, keyCode, event ->
-                if (event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
-                    (selectedChildButton ?: childButtons.firstOrNull()?.second)?.requestFocus(); true
-                } else false
+            button.setOnFocusChangeListener { view, hasFocus ->
+                Ui.applyFocusHighlight(view, hasFocus)
+                if (hasFocus) focusParent(id, button)
             }
-            parentHost.addView(button, LinearLayout.LayoutParams(-1, Ui.dp(this, 38)).apply { bottomMargin = Ui.dp(this@LiveActivity, 4) })
+            button.setOnKeyListener { _, keyCode, event ->
+                if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                val parents = parentButtons.values.toList()
+                val index = parents.indexOf(button)
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> { (selectedChildButton ?: childButtons.firstOrNull()?.second)?.requestFocus(); true }
+                    KeyEvent.KEYCODE_DPAD_LEFT -> { cancelButton.requestFocus(); true }
+                    KeyEvent.KEYCODE_DPAD_UP -> {
+                        when (val target = LiveFilterFocusPolicy.parent(index, parents.size, PgcFocusDirection.UP)) {
+                            is LiveFilterFocusTarget.Parent -> parents.getOrNull(target.index)?.requestFocus()
+                            LiveFilterFocusTarget.Apply -> applyButton.requestFocus()
+                            else -> Unit
+                        }
+                        true
+                    }
+                    KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        when (val target = LiveFilterFocusPolicy.parent(index, parents.size, PgcFocusDirection.DOWN)) {
+                            is LiveFilterFocusTarget.Parent -> parents.getOrNull(target.index)?.requestFocus()
+                            else -> Unit
+                        }
+                        true
+                    }
+                    else -> false
+                }
+            }
+            parentHost.addView(button, LinearLayout.LayoutParams(-1, Ui.dp(this, 48)).apply { bottomMargin = Ui.dp(this@LiveActivity, 4) })
             parentButtons[id] = button
             if (id == pendingParentId) focusedParent = button
         }
         renderChildren()
-        val actions = LinearLayout(this).apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL }
-        actions.addView(Ui.button(this, "取消") { closeAreaFilterPanel() }.apply { tag = "live-filter-cancel" })
-        actions.addView(Ui.button(this, "应用") {
-            selectedParentId = pendingParentId
-            selectedAreaId = pendingAreaId.takeIf { candidate ->
-                candidate == 0 || areas.any { it.areaId == candidate && (pendingParentId == 0 || it.parentId == pendingParentId) }
-            } ?: 0
-            updateCategoryFilterLabel()
-            closeAreaFilterPanel()
-            loadCategoryRooms(reset = true)
-        }.apply {
-            tag = "live-filter-apply"
-            layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(this@LiveActivity, 42)).apply { marginStart = Ui.dp(this@LiveActivity, 8) }
-        })
-        panel.addView(actions, LinearLayout.LayoutParams(-1, Ui.dp(this, 42)))
         val availableWidth = content.width.takeIf { it > 0 } ?: resources.displayMetrics.widthPixels
         val availableHeight = content.height.takeIf { it > 0 } ?: resources.displayMetrics.heightPixels
         val width = minOf(availableWidth - Ui.dp(this, 32), Ui.dp(this, if (Ui.isCompactWidth(this)) 620 else 920))
@@ -515,6 +622,8 @@ class LiveActivity : AppCompatActivity() {
         content.addView(overlay, FrameLayout.LayoutParams(-1, -1))
         filterOverlay = overlay
         val initialFocus = selectedChildButton ?: focusedParent ?: parentButtons.values.firstOrNull()
+        filterEntryFocus = initialFocus
+        filterInitialFocus = initialFocus
         initialFocus?.post { initialFocus.requestFocus() }
     }
 
@@ -522,6 +631,7 @@ class LiveActivity : AppCompatActivity() {
         val overlay = filterOverlay ?: return
         content.removeView(overlay)
         filterOverlay = null
+        filterInitialFocus = null
         if (restoreFocus) areaFilterButton?.post { areaFilterButton?.requestFocus() }
     }
 

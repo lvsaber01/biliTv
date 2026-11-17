@@ -143,6 +143,18 @@ class BiliApiClient(context: Context) {
         return result.toVideoSummaries()
     }
 
+    /** Current web search-square hot terms; the WBI endpoint is preferred. */
+    fun getHotSearches(limit: Int = 10): List<String> {
+        val params = linkedMapOf("limit" to limit.coerceIn(1, 50).toString(), "platform" to "web")
+        val root = runCatching {
+            getSigned("/x/web-interface/wbi/search/square", params, referer = SEARCH_REFERER)
+        }.getOrElse {
+            // Compatibility fallback used by older web clients; keep the signed endpoint primary.
+            get("/x/web-interface/search/square", params, referer = SEARCH_REFERER)
+        }
+        return SearchHotwordParser.parse(root, limit)
+    }
+
     fun getVideoDetail(bvid: String): VideoDetail {
         val data = get("/x/web-interface/view", mapOf("bvid" to bvid)).optJSONObject("data")
             ?: throw BiliApiException(-500, "视频详情为空")
@@ -1500,6 +1512,7 @@ class BiliApiClient(context: Context) {
         private val DASH_QUALITY_IDS = setOf(74, 100, 112, 116, 120, 125, 126, 127, 129)
         private val HDR_QUALITY_IDS = setOf(125, 126, 129)
         private const val HOME_REFERER = "https://www.bilibili.com/"
+        private const val SEARCH_REFERER = "https://search.bilibili.com/"
         private const val LIVE_REFERER = "https://live.bilibili.com/"
         private const val LIVE_SEARCH_REFERER = "https://search.bilibili.com/live"
         private const val LIVE_PAGE_SIZE = 20

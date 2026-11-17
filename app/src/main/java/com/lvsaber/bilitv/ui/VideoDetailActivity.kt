@@ -42,6 +42,8 @@ class VideoDetailActivity : AppCompatActivity() {
         val scroll = NestedScrollView(this).apply {
             isFillViewport = true
             background = Ui.pageBackground(context)
+            clipChildren = false
+            clipToPadding = false
         }
         body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -87,6 +89,8 @@ class VideoDetailActivity : AppCompatActivity() {
         val hero = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             background = Ui.panel(context)
+            clipChildren = false
+            clipToPadding = false
             setPadding(Ui.dp(context, 14), Ui.dp(context, 14), Ui.dp(context, 14), Ui.dp(context, 14))
         }
         val poster = Ui.poster(this)
@@ -135,20 +139,33 @@ class VideoDetailActivity : AppCompatActivity() {
             setPadding(0, 0, 0, Ui.dp(context, 10))
         })
         val actions = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        val primary = Ui.button(this, "播放") { launch(detail) }
+        // Keep both playback choices on the same dark surface. A permanently
+        // bright primary fill made the unfocused resume action look selected
+        // even after D-pad focus had moved to "从头播放".
+        val primary = Ui.secondaryButton(this, "播放") { launch(detail) }
         primary.minWidth = 0
         primary.isSingleLine = true
+        primary.isFocusable = true
+        primary.isFocusableInTouchMode = true
         primary.ellipsize = android.text.TextUtils.TruncateAt.END
+        applyPlaybackActionFocusStyle(primary)
         playButton = primary
         val restart = Ui.chip(this, "从头播放", false) { launch(detail, detail.pages.firstOrNull()?.cid, true) }
         restart.minWidth = 0
         restart.isSingleLine = true
+        restart.isFocusable = true
+        restart.isFocusableInTouchMode = true
         restart.ellipsize = android.text.TextUtils.TruncateAt.END
+        applyPlaybackActionFocusStyle(restart)
+        primary.id = View.generateViewId()
+        restart.id = View.generateViewId()
+        primary.nextFocusRightId = restart.id
+        restart.nextFocusLeftId = primary.id
         actions.addView(primary, LinearLayout.LayoutParams(0, Ui.dp(this, 46), 1f).apply {
-            marginEnd = Ui.dp(this@VideoDetailActivity, 6)
+            marginEnd = Ui.dp(this@VideoDetailActivity, 8)
         })
         actions.addView(restart, LinearLayout.LayoutParams(0, Ui.dp(this, 46), 1f).apply {
-            marginStart = Ui.dp(this@VideoDetailActivity, 6)
+            marginStart = Ui.dp(this@VideoDetailActivity, 8)
         })
         info.addView(actions)
         focusRows += listOf(primary, restart)
@@ -206,7 +223,7 @@ class VideoDetailActivity : AppCompatActivity() {
         focusRows += listOf(expand)
         body.addView(descriptionPanel, LinearLayout.LayoutParams(-1, -2))
         focusRows.forEachIndexed { rowIndex, row -> row.forEachIndexed { column, view ->
-            view.id = View.generateViewId()
+            if (view.id == View.NO_ID) view.id = View.generateViewId()
             view.setOnKeyListener { _, key, event ->
                 if (event.action != android.view.KeyEvent.ACTION_DOWN) false else {
                     val target = when (key) {
@@ -216,7 +233,7 @@ class VideoDetailActivity : AppCompatActivity() {
                         android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> row.getOrNull(column + 1)
                         else -> return@setOnKeyListener false
                     }
-                    target?.requestFocus(); true
+                    target?.requestFocus() == true
                 }
             }
         } }
@@ -308,6 +325,20 @@ class VideoDetailActivity : AppCompatActivity() {
         val detail = currentDetail ?: return
         val progress = ProgressRepository.get(this).find(detail.summary.bvid)
         playButton?.text = if (progress?.canResume == true && detail.pages.any { it.cid == progress.cid }) "继续播放 · ${progress.label}" else "播放第一 P"
+    }
+
+    private fun applyPlaybackActionFocusStyle(button: android.widget.Button) {
+        val radius = Ui.dp(this, 12)
+        val normal = Ui.roundedBackground(Ui.surfaceRaised, radius).apply {
+            setStroke(Ui.dp(this@VideoDetailActivity, 1), Ui.divider)
+        }
+        val focused = Ui.roundedBackground(android.graphics.Color.rgb(24, 57, 70), radius).apply {
+            setStroke(Ui.dp(this@VideoDetailActivity, 4), Ui.blue)
+        }
+        button.background = android.graphics.drawable.StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_focused), focused)
+            addState(intArrayOf(), normal)
+        }
     }
 
     private fun formatCount(value: Long): String = when {

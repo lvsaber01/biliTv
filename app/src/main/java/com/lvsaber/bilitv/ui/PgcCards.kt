@@ -68,6 +68,20 @@ class PgcCardView(
         Ui.focusHighlight(this)
     }
 
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        super.onLayout(changed, left, top, right, bottom)
+        if (style == Style.CHANNEL && poster.width > 0) {
+            val expectedHeight = (poster.width * 9f / 16f).toInt()
+            if (poster.height != expectedHeight) {
+                // RecyclerView can initially measure the first grid row against
+                // a stale exact height. Correct it from the final card width and
+                // request a second pass so that the title row is not exposed
+                // while its posters collapse to a few pixels.
+                poster.layoutParams = poster.layoutParams.apply { height = expectedHeight }
+            }
+        }
+    }
+
     fun bind(season: PgcSeason, progress: PgcProgress? = null, extra: String = "") {
         boundKey = season.seasonId.toString()
         title.text = season.title

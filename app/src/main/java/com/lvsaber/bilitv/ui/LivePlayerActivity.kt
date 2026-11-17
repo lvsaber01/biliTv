@@ -59,6 +59,9 @@ class LivePlayerActivity : AppCompatActivity() {
     private lateinit var root: FrameLayout
     private lateinit var playerView: PlayerView
     private lateinit var danmakuOverlay: LiveDanmakuOverlay
+    private lateinit var pauseScrim: View
+    private lateinit var topScrim: View
+    private lateinit var bottomScrim: View
     private lateinit var header: LinearLayout
     private lateinit var headerTitle: TextView
     private lateinit var headerMeta: TextView
@@ -66,6 +69,10 @@ class LivePlayerActivity : AppCompatActivity() {
     private lateinit var errorPanel: LinearLayout
     private lateinit var errorText: TextView
     private lateinit var controls: LinearLayout
+    private lateinit var morePanel: LinearLayout
+    private lateinit var moreButton: Button
+    private lateinit var moreCloseButton: Button
+    private var moreOptionButtons: List<Button> = emptyList()
     private lateinit var playButton: Button
     private lateinit var danmakuButton: Button
     private lateinit var favoriteButton: Button
@@ -122,13 +129,14 @@ class LivePlayerActivity : AppCompatActivity() {
         loadRoom(roomId)
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                when (LiveControlsPolicy.backAction(
-                    dialogOpen = activeChoiceDialog?.isShowing == true,
-                    controlsVisible = controlsVisible || errorPanel.visibility == View.VISIBLE,
-                )) {
-                    LiveOverlayBackAction.DISMISS_DIALOG -> activeChoiceDialog?.dismiss()
-                    LiveOverlayBackAction.HIDE_CONTROLS -> hideControls()
-                    LiveOverlayBackAction.EXIT_PLAYER -> finish()
+                when {
+                    activeChoiceDialog?.isShowing == true -> activeChoiceDialog?.dismiss()
+                    morePanel.visibility == View.VISIBLE -> closeMorePanel()
+                    LiveControlsPolicy.backAction(
+                        dialogOpen = false,
+                        controlsVisible = controlsVisible || errorPanel.visibility == View.VISIBLE,
+                    ) == LiveOverlayBackAction.HIDE_CONTROLS -> hideControls()
+                    else -> finish()
                 }
             }
         })
@@ -141,7 +149,8 @@ class LivePlayerActivity : AppCompatActivity() {
                 KeyEvent.KEYCODE_MENU,
             ) && !controlsVisible
         ) {
-            showControls(focusFirst = true)
+            showControls(focusFirst = event.keyCode != KeyEvent.KEYCODE_DPAD_DOWN)
+            if (event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN && errorPanel.visibility != View.VISIBLE) danmakuButton.requestFocus()
             return true
         }
         if (event.action == KeyEvent.ACTION_DOWN && event.keyCode == KeyEvent.KEYCODE_MENU) {
@@ -149,9 +158,19 @@ class LivePlayerActivity : AppCompatActivity() {
             return true
         }
         if (event.action == KeyEvent.ACTION_DOWN && controlsVisible && errorPanel.visibility != View.VISIBLE &&
-            event.keyCode in setOf(KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN) &&
-            currentFocus?.let { isInside(controls, it) } == true
-        ) return true
+            event.keyCode in setOf(KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN)
+        ) {
+            val focused = currentFocus
+            when {
+                focused?.let { isInside(controls, it) } == true && event.keyCode == KeyEvent.KEYCODE_DPAD_UP -> {
+                    playButton.requestFocus(); return true
+                }
+                focused?.let { isInside(controls, it) } == true -> return true
+                focused === playButton && event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    (danmakuButton.takeIf { it.visibility == View.VISIBLE } ?: qualityButton).requestFocus(); return true
+                }
+            }
+        }
         return super.dispatchKeyEvent(event)
     }
 
@@ -184,10 +203,28 @@ class LivePlayerActivity : AppCompatActivity() {
         }
         root.addView(danmakuOverlay, FrameLayout.LayoutParams(-1, -1))
 
+        pauseScrim = View(this).apply { setBackgroundColor(0x55000000); visibility = View.GONE }
+        root.addView(pauseScrim, FrameLayout.LayoutParams(-1, -1))
+        topScrim = View(this).apply {
+            background = android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(0xB80A0D12.toInt(), 0x620A0D12, android.graphics.Color.TRANSPARENT),
+            )
+            visibility = View.GONE
+        }
+        root.addView(topScrim, FrameLayout.LayoutParams(-1, Ui.dp(this, 176), Gravity.TOP))
+        bottomScrim = View(this).apply {
+            background = android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(android.graphics.Color.TRANSPARENT, 0xB80A0D12.toInt(), 0xF20A0D12.toInt()),
+            )
+            visibility = View.GONE
+        }
+        root.addView(bottomScrim, FrameLayout.LayoutParams(-1, Ui.dp(this, 220), Gravity.BOTTOM))
+
         header = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = Ui.roundedBackground(0xB8000000.toInt(), Ui.dp(context, 14))
-            setPadding(Ui.dp(context, 10), Ui.dp(context, 5), Ui.dp(context, 14), Ui.dp(context, 5))
+            setPadding(Ui.dp(context, 28), Ui.dp(context, 18), Ui.dp(context, 28), Ui.dp(context, 8))
             visibility = View.GONE
         }
         headerTitle = Ui.text(this, "", 18f, Ui.text).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }
@@ -225,27 +262,95 @@ class LivePlayerActivity : AppCompatActivity() {
         errorPanel.addView(errorActions, LinearLayout.LayoutParams(-1, Ui.dp(this, 50)).apply { topMargin = Ui.dp(this@LivePlayerActivity, 10) })
         root.addView(errorPanel, FrameLayout.LayoutParams(Ui.dp(this, 620), -2, Gravity.CENTER))
 
+        playButton = Ui.chip(this, "▶", false) { togglePlayback() }.apply {
+            contentDescription = "播放或暂停直播"
+            setTextSize(28f)
+            minWidth = 0
+            setPadding(0, 0, 0, 0)
+            setTextColor(android.graphics.Color.WHITE)
+            background = Ui.roundedBackground(0xD91C2934.toInt(), Ui.dp(context, 40))
+        }
+        root.addView(playButton, FrameLayout.LayoutParams(Ui.dp(this, 80), Ui.dp(this, 80), Gravity.CENTER))
+
         controls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = Ui.roundedBackground(0xD90C1015.toInt(), Ui.dp(context, 18))
-            setPadding(Ui.dp(context, 8), Ui.dp(context, 6), Ui.dp(context, 8), Ui.dp(context, 6))
+            background = android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(android.graphics.Color.TRANSPARENT, 0xA80A0D12.toInt(), 0xE80A0D12.toInt()),
+            )
+            setPadding(Ui.dp(context, 28), Ui.dp(context, 12), Ui.dp(context, 28), Ui.dp(context, 18))
             visibility = View.GONE
         }
         val controlRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        playButton = controlButton("播放") { togglePlayback() }
         danmakuButton = controlButton("弹幕") { toggleDanmaku() }
         qualityButton = controlButton("画质") { showQualityChoices() }
         codecButton = controlButton("编码") { showCodecChoices() }
         protocolButton = controlButton("协议") { showProtocolChoices() }
         routeButton = controlButton("线路") { showRouteChoices() }
         favoriteButton = controlButton("收藏") { toggleFavorite() }
-        listOf(playButton, danmakuButton, qualityButton, codecButton, protocolButton, routeButton, favoriteButton).forEach(controlRow::addView)
+        moreButton = controlButton("更多") { toggleMorePanel() }
+        listOf(danmakuButton, qualityButton, moreButton).forEach(controlRow::addView)
         controls.addView(HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             addView(controlRow)
-        }, LinearLayout.LayoutParams(-1, Ui.dp(this, 54)))
+        }, LinearLayout.LayoutParams(-1, Ui.dp(this, 52)))
         root.addView(controls, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply {
-            leftMargin = Ui.dp(this@LivePlayerActivity, 26); rightMargin = Ui.dp(this@LivePlayerActivity, 26); bottomMargin = Ui.dp(this@LivePlayerActivity, 24)
+            bottomMargin = Ui.dp(this@LivePlayerActivity, 2)
+        })
+        morePanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Ui.floatingPanel(context, 18)
+            elevation = Ui.dp(context, 18).toFloat()
+            setPadding(Ui.dp(context, 14), Ui.dp(context, 10), Ui.dp(context, 14), Ui.dp(context, 12))
+            visibility = View.GONE
+        }
+        val moreHeader = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        moreHeader.addView(Ui.text(this, "直播设置", 17f, Ui.text).apply { setPadding(0, 0, 0, 0) }, LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1f))
+        moreCloseButton = Ui.secondaryButton(this, "关闭") { closeMorePanel() }.apply {
+            minWidth = Ui.dp(context, 58)
+            tag = "live-player-more-close"
+            setOnKeyListener { _, keyCode, event ->
+                if (event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                    moreOptionButtons.firstOrNull()?.requestFocus(); true
+                } else if (event.action == KeyEvent.ACTION_DOWN && keyCode in setOf(KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT)) true
+                else false
+            }
+        }
+        morePanel.addView(moreHeader)
+        val optionActions = listOf(
+            "编码格式" to { closeMorePanel(); showCodecChoices() },
+            "直播协议" to { closeMorePanel(); showProtocolChoices() },
+            "播放线路" to { closeMorePanel(); showRouteChoices() },
+            "收藏直播间" to { closeMorePanel(); toggleFavorite() },
+        )
+        moreOptionButtons = optionActions.mapIndexed { index, (label, action) ->
+            controlButton(label, action).apply {
+                background = Ui.roundedBackground(Ui.surfaceRaised, Ui.dp(context, 10))
+                setTextColor(Ui.text)
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(Ui.dp(context, 14), 0, Ui.dp(context, 12), 0)
+                id = View.generateViewId()
+                setOnKeyListener { _, keyCode, event ->
+                    if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                    when (keyCode) {
+                        KeyEvent.KEYCODE_DPAD_UP -> {
+                            if (index > 0) moreOptionButtons.getOrNull(index - 1)?.requestFocus() else moreCloseButton.requestFocus()
+                            true
+                        }
+                        KeyEvent.KEYCODE_DPAD_DOWN -> { moreOptionButtons.getOrNull(index + 1)?.requestFocus(); true }
+                        KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> true
+                        else -> false
+                    }
+                }
+            }
+        }
+        moreOptionButtons.forEach { option ->
+            morePanel.addView(option, LinearLayout.LayoutParams(-1, Ui.dp(this, 42)).apply { topMargin = Ui.dp(this@LivePlayerActivity, 5) })
+        }
+        updateMoreOptionLabels()
+        root.addView(morePanel, FrameLayout.LayoutParams(Ui.dp(this, 360), -2, Gravity.RIGHT or Gravity.BOTTOM).apply {
+            rightMargin = Ui.dp(this@LivePlayerActivity, 28)
+            bottomMargin = Ui.dp(this@LivePlayerActivity, 92)
         })
         root.setOnClickListener { if (controlsVisible) hideControls() else showControls(focusFirst = false) }
         root.post { updateDanmakuViewport() }
@@ -253,8 +358,12 @@ class LivePlayerActivity : AppCompatActivity() {
     }
 
     private fun controlButton(label: String, action: () -> Unit): Button = Ui.button(this, label, action).apply {
-        minWidth = Ui.dp(context, 96)
-        layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(this@LivePlayerActivity, 44)).apply { marginEnd = Ui.dp(this@LivePlayerActivity, 5) }
+        setTextSize(13f)
+        minWidth = Ui.dp(context, 84)
+        setPadding(Ui.dp(context, 12), 0, Ui.dp(context, 12), 0)
+        background = Ui.roundedBackground(0x991B2732.toInt(), Ui.dp(context, 16))
+        setTextColor(android.graphics.Color.WHITE)
+        layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(this@LivePlayerActivity, 42)).apply { marginEnd = Ui.dp(this@LivePlayerActivity, 8) }
         setOnFocusChangeListener { view, focused ->
             Ui.applyFocusHighlight(view, focused)
             if (focused) armControlsTimeout()
@@ -764,6 +873,7 @@ class LivePlayerActivity : AppCompatActivity() {
         val saved = room?.summary?.roomId?.let(library::isFavorite) == true
         favoriteButton.text = if (saved) "已收藏" else "收藏"
         favoriteButton.setTextColor(if (saved) Ui.pink else android.graphics.Color.WHITE)
+        updateMoreOptionLabels()
     }
 
     private fun updateControlLabels() {
@@ -775,6 +885,16 @@ class LivePlayerActivity : AppCompatActivity() {
         val attempt = attempts.getOrNull(currentAttemptIndex)
         routeButton.text = "线路：${attempt?.route?.label ?: "自动"}"
         updateFavoriteButton()
+        updateMoreOptionLabels()
+    }
+
+    private fun updateMoreOptionLabels() {
+        if (moreOptionButtons.isEmpty()) return
+        moreOptionButtons.getOrNull(0)?.text = codecButton.text
+        moreOptionButtons.getOrNull(1)?.text = protocolButton.text
+        moreOptionButtons.getOrNull(2)?.text = routeButton.text
+        val saved = room?.summary?.roomId?.let(library::isFavorite) == true
+        moreOptionButtons.getOrNull(3)?.text = if (saved) "已收藏 · 点击取消收藏" else "收藏直播间"
     }
 
     private fun updateDanmakuButtonLabel() {
@@ -787,7 +907,38 @@ class LivePlayerActivity : AppCompatActivity() {
     }
 
     private fun updatePlayButton() {
-        playButton.text = if (player?.playWhenReady == true) "暂停" else "播放"
+        playButton.text = if (player?.playWhenReady == true) "Ⅱ" else "▶"
+        playButton.contentDescription = if (player?.playWhenReady == true) "暂停直播" else "继续直播"
+        updatePlaybackChrome()
+    }
+
+    private fun updatePlaybackChrome(animateHide: Boolean = false) {
+        if (!::playButton.isInitialized) return
+        val errorVisible = ::errorPanel.isInitialized && errorPanel.visibility == View.VISIBLE
+        val showChrome = controlsVisible
+        val showPauseScrim = showChrome && firstFrameRendered && player?.playWhenReady != true && !errorVisible
+        setChromeVisibility(topScrim, showChrome, animateHide)
+        setChromeVisibility(bottomScrim, showChrome, animateHide)
+        setChromeVisibility(playButton, showChrome && !errorVisible, animateHide)
+        setChromeVisibility(pauseScrim, showPauseScrim, animateHide)
+    }
+
+    private fun setChromeVisibility(view: View, visible: Boolean, animateHide: Boolean = false) {
+        view.animate().cancel()
+        if (visible) {
+            view.visibility = View.VISIBLE
+            view.alpha = 1f
+        } else if (animateHide && view.visibility == View.VISIBLE) {
+            view.animate().alpha(0f).setDuration(CONTROLS_FADE_MS).withEndAction {
+                if (!controlsVisible) {
+                    view.visibility = View.GONE
+                    view.alpha = 1f
+                }
+            }.start()
+        } else {
+            view.visibility = View.GONE
+            view.alpha = 1f
+        }
     }
 
     private fun showControls(focusFirst: Boolean) {
@@ -810,14 +961,18 @@ class LivePlayerActivity : AppCompatActivity() {
         if (focusFirst) {
             if (playbackErrorMessage != null) focusRetryAction() else playButton.requestFocus()
         }
+        updatePlaybackChrome()
         armControlsTimeout()
     }
 
     private fun hideControls() {
-        if (currentFocus != null && (isInside(controls, currentFocus!!) || isInside(errorPanel, currentFocus!!))) currentFocus?.clearFocus()
+        closeMorePanel(restoreFocus = false)
+        mainHandler.removeCallbacks(controlsTimeout)
+        if (currentFocus != null && (isInside(controls, currentFocus!!) || isInside(morePanel, currentFocus!!) || isInside(errorPanel, currentFocus!!))) currentFocus?.clearFocus()
         controls.clearFocus()
         errorPanel.clearFocus()
         controlsVisible = false
+        updatePlaybackChrome(animateHide = true)
         controls.animate().cancel()
         header.animate().cancel()
         errorPanel.animate().cancel()
@@ -841,9 +996,26 @@ class LivePlayerActivity : AppCompatActivity() {
 
     private fun armControlsTimeout() {
         mainHandler.removeCallbacks(controlsTimeout)
-        if (LiveControlsPolicy.shouldArmHideTimeout(controlsVisible, activeChoiceDialog?.isShowing == true)) {
+        if (LiveControlsPolicy.shouldArmHideTimeout(controlsVisible, activeChoiceDialog?.isShowing == true) && morePanel.visibility != View.VISIBLE) {
             mainHandler.postDelayed(controlsTimeout, CONTROLS_HIDE_DELAY_MS)
         }
+    }
+
+    private fun toggleMorePanel() {
+        if (morePanel.visibility == View.VISIBLE) closeMorePanel()
+        else {
+            showControls(focusFirst = false)
+            morePanel.visibility = View.VISIBLE
+            mainHandler.removeCallbacks(controlsTimeout)
+            moreOptionButtons.firstOrNull()?.requestFocus() ?: moreCloseButton.requestFocus()
+        }
+    }
+
+    private fun closeMorePanel(restoreFocus: Boolean = true) {
+        if (!::morePanel.isInitialized || morePanel.visibility != View.VISIBLE) return
+        morePanel.visibility = View.GONE
+        if (restoreFocus) moreButton.requestFocus()
+        armControlsTimeout()
     }
 
     private fun updateDanmakuViewport() {

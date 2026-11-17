@@ -77,6 +77,7 @@ class BangumiActivity : AppCompatActivity() {
     private var restoreSearchThroughPage = 0
     private val searchItems = mutableListOf<PgcSeason>()
     private var pageGeneration = 0
+    private val initialGridFocusGate = BangumiInitialGridFocusGate()
     private var currentAdapter: PgcSeasonAdapter? = null
     private var currentGrid: RecyclerView? = null
     private var currentStatus: TextView? = null
@@ -86,7 +87,6 @@ class BangumiActivity : AppCompatActivity() {
     private var indexFilterSummary: TextView? = null
     private var pendingSearch = ""
     private lateinit var zoneButton: Button
-    private var zoneSwitchView: LinearLayout? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -208,13 +208,8 @@ class BangumiActivity : AppCompatActivity() {
             root.addView(toolbar, FrameLayout.LayoutParams(-1, Ui.dp(this, 100)).apply { topMargin = Ui.dp(this@BangumiActivity, 14) })
         } else {
             toolbar.addView(logo, LinearLayout.LayoutParams(Ui.dp(this, 96), Ui.dp(this, 58)))
-            zoneSwitchView = Ui.zoneSwitch(this, "bangumi", ::openZone).apply {
-                layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(this@BangumiActivity, 48)).apply {
-                    marginStart = Ui.dp(this@BangumiActivity, 6)
-                    marginEnd = Ui.dp(this@BangumiActivity, 6)
-                }
-            }
-            toolbar.addView(zoneSwitchView)
+            zoneButton.text = "专区：番剧 ▾"
+            toolbar.addView(zoneButton)
             toolbar.addView(navScroll, LinearLayout.LayoutParams(0, Ui.dp(this, 58), 1f))
             fixedInOrder.forEach { toolbar.addView(it) }
             root.addView(toolbar, FrameLayout.LayoutParams(-1, Ui.dp(this, 62)).apply { topMargin = Ui.dp(this@BangumiActivity, 14) })
@@ -223,7 +218,7 @@ class BangumiActivity : AppCompatActivity() {
         return root
     }
 
-    private fun navButton(label: String, action: () -> Unit): Button = Ui.chip(this, label, false, action).apply {
+    private fun navButton(label: String, action: () -> Unit): Button = Ui.navigationButton(this, label, action).apply {
         tag = "nav:$label"
         Ui.focusHighlight(this)
         background = Ui.roundedBackground(android.graphics.Color.TRANSPARENT, Ui.dp(context, 12))
@@ -253,7 +248,6 @@ class BangumiActivity : AppCompatActivity() {
     }
 
     private fun updateNavigation() {
-        zoneSwitchView?.let { Ui.setZoneSwitchSelection(it, "bangumi") }
         navButtons.forEach { (key, button) ->
             val selected = key == currentPage
             button.setTextColor(if (selected) android.graphics.Color.WHITE else Ui.muted)
@@ -261,14 +255,6 @@ class BangumiActivity : AppCompatActivity() {
         }
         fixedButtons.forEach { (key, button) ->
             button.background = Ui.roundedBackground(if (currentPage == key) 0x27FFFFFF else android.graphics.Color.TRANSPARENT, Ui.dp(this, 12))
-        }
-    }
-
-    private fun openZone(zone: String) {
-        when (zone) {
-            "video" -> startActivity(Intent(this, MainActivity::class.java))
-            "bangumi" -> showPage("recommend")
-            "live" -> startActivity(Intent(this, LiveActivity::class.java))
         }
     }
 
@@ -295,8 +281,10 @@ class BangumiActivity : AppCompatActivity() {
 
     private fun showPage(key: String, reload: Boolean = true) {
         if (indexFilterPanel != null && key != "index") closeIndexFilterPanel(restoreFocus = false)
+        val enteringPage = key != currentPage
         capturePagePosition()
         currentPage = key
+        initialGridFocusGate.pageSelected(key, enteringPage)
         pageGeneration++
         currentAdapter = null; currentGrid = null; currentStatus = null; currentMore = null
         if (key != "index") {
@@ -361,8 +349,10 @@ class BangumiActivity : AppCompatActivity() {
 
     private data class PagingFocus(val seasonId: Long?)
 
-    private fun capturePagingFocus(): PagingFocus {
-        val focusedTag = currentFocus?.tag?.toString().orEmpty()
+    private fun capturePagingFocus(): PagingFocus? {
+        val grid = currentGrid ?: return null
+        val focused = currentFocus?.takeIf { isWithin(it, grid) } ?: return null
+        val focusedTag = focused.tag?.toString().orEmpty()
         val seasonId = focusedTag.removePrefix("pgc-season/").toLongOrNull()
         return PagingFocus(seasonId)
     }
@@ -382,14 +372,24 @@ class BangumiActivity : AppCompatActivity() {
         val grid = currentGrid ?: return
         val count = grid.adapter?.itemCount ?: 0
         if (position !in 0 until count) return
-        grid.post {
-            if (isFinishing || isDestroyed) return@post
-            grid.layoutManager?.scrollToPosition(position)
-            grid.postOnAnimation {
-                if (!isFinishing && !isDestroyed) {
-                    grid.findViewHolderForAdapterPosition(position)?.itemView?.requestFocus()
-                }
-            }
+        grid.layoutManager?.scrollToPosition(position)
+        var attemptsLeft = 12
+        fun requestWhenAttached() {
+            if (isFinishing || isDestroyed) return
+            val card = grid.findViewHolderForAdapterPosition(position)?.itemView
+            if (card?.isShown == true && card.requestFocus()) return
+            if (attemptsLeft-- > 0) grid.postOnAnimation(::requestWhenAttached)
+        }
+        // ListAdapter commits before RecyclerView necessarily lays out its
+        // first holder. Retry across frames instead of leaving focus on the
+        // page's earlier Refresh control when that holder is not attached yet.
+        grid.postOnAnimation(::requestWhenAttached)
+    }
+
+    private fun focusInitialGridIfNeeded(page: String, hasItems: Boolean) {
+        when (initialGridFocusGate.consume(page, hasItems)) {
+            true -> focusSeasonCard(0)
+            false, null -> restoreCurrentPageFocus()
         }
     }
 
@@ -861,7 +861,10 @@ class BangumiActivity : AppCompatActivity() {
                     more.text = "加载更多"
                     more.visibility = View.GONE
                     adapter.submitList(items) {
-                        pagingFocus?.let { restorePagingFocus(it, oldCount, adapter) } ?: restoreCurrentPageFocus()
+                        when {
+                            pagingFocus != null -> restorePagingFocus(pagingFocus, oldCount, adapter)
+                            reset -> focusInitialGridIfNeeded("ranking", items.isNotEmpty())
+                        }
                         gridPrefetchAfterPageLoaded()
                     }
                     status.text = if (items.isEmpty()) "暂无${category.label}排行" else
@@ -918,7 +921,10 @@ class BangumiActivity : AppCompatActivity() {
                     indexPage = requestedPage; indexHasMore = page.hasNext
                     more.visibility = View.GONE
                     adapter.submitList(items) {
-                        pagingFocus?.let { restorePagingFocus(it, oldCount, adapter) } ?: restoreCurrentPageFocus()
+                        when {
+                            pagingFocus != null -> restorePagingFocus(pagingFocus, oldCount, adapter)
+                            reset -> focusInitialGridIfNeeded("index", items.isNotEmpty())
+                        }
                         gridPrefetchAfterPageLoaded()
                     }
                     status.text = if (items.isEmpty()) "没有符合条件的日本动画/国创结果" else "${category.label} · ${items.size} 部作品${if (indexHasMore) "" else " · 已到末尾"}"
@@ -1027,7 +1033,8 @@ class BangumiActivity : AppCompatActivity() {
                     more.text = "加载更多"
                     more.setOnClickListener { searchPgc(pendingSearch, reset = false) }
                     adapter.submitList(searchItems.toList()) {
-                        pagingFocus?.let { restorePagingFocus(it, oldCount, adapter) } ?: restoreCurrentPageFocus()
+                        if (pagingFocus != null) restorePagingFocus(pagingFocus, oldCount, adapter)
+                        else if (reset) restoreCurrentPageFocus()
                     }
                     status.text = if (searchItems.isEmpty()) "没有找到符合范围的番剧" else "找到 ${searchItems.size} 部作品${if (searchHasMore) " · 还可继续加载" else " · 已到末尾"}"
                     if (searchPage < restoreSearchThroughPage && searchHasMore) searchPgc(keyword, reset = false)
@@ -1073,7 +1080,8 @@ class BangumiActivity : AppCompatActivity() {
                     more.text = "加载更多"; more.visibility = View.GONE
                     more.setOnClickListener { loadFollowingPage(reset = false) }
                     adapter.submitList(items) {
-                        pagingFocus?.let { restorePagingFocus(it, oldCount, adapter) } ?: restoreCurrentPageFocus()
+                        if (pagingFocus != null) restorePagingFocus(pagingFocus, oldCount, adapter)
+                        else if (reset) restoreCurrentPageFocus()
                         gridPrefetchAfterPageLoaded()
                     }
                     status.text = if (items.isEmpty()) "暂无追番作品" else "已加载 ${items.size} 部 · ${category.label}${if (followingHasMore) " · 下滑加载更多" else " · 已到末尾"}"

@@ -287,8 +287,8 @@ object Ui {
 
     fun cardHeight(context: Context, width: Int): Int {
         val fontScale = context.resources.configuration.fontScale.coerceAtLeast(1f)
-        // Two readable title lines, two metadata lines, and a small padding allowance.
-        val textBlockHeight = ceil(72f * fontScale).toInt()
+        // Reserve two title lines, two metadata lines, and breathing room above the card border.
+        val textBlockHeight = ceil(78f * fontScale).toInt()
         return (width - dp(context, 12)) * 9 / 16 + dp(context, textBlockHeight)
     }
 

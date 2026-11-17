@@ -34,6 +34,18 @@ class LiveLibraryRepository private constructor(context: Context) {
         write(KEY_RECENT, current.take(MAX_RECENT))
     }
 
+    @Synchronized
+    fun updateStatuses(statuses: Map<Long, LiveRoomSummary>) {
+        if (statuses.isEmpty()) return
+        listOf(KEY_FAVORITES, KEY_RECENT).forEach { key ->
+            val updated = read(key).map { saved ->
+                val current = statuses[saved.anchorMid] ?: return@map saved
+                saved.copy(liveStatus = current.liveStatus, online = current.online)
+            }
+            write(key, updated)
+        }
+    }
+
     private fun read(key: String): List<LiveRoomSummary> = runCatching {
         val array = JSONArray(prefs.getString(key, "[]"))
         buildList {
@@ -53,8 +65,9 @@ class LiveLibraryRepository private constructor(context: Context) {
                         areaId = item.optInt("area_id"),
                         areaName = item.optString("area"),
                         online = item.optLong("online"),
-                        liveStatus = item.optInt("live_status", 1),
+                        liveStatus = item.optInt("live_status", -1),
                         isPortrait = item.optBoolean("portrait"),
+                        anchorMid = item.optLong("anchor_mid"),
                     ),
                 )
             }
@@ -77,7 +90,8 @@ class LiveLibraryRepository private constructor(context: Context) {
                     .put("area", room.areaName)
                     .put("online", room.online)
                     .put("live_status", room.liveStatus)
-                    .put("portrait", room.isPortrait),
+                    .put("portrait", room.isPortrait)
+                    .put("anchor_mid", room.anchorMid),
             )
         }
         prefs.edit().putString(key, array.toString()).apply()

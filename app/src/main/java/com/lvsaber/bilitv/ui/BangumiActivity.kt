@@ -29,11 +29,13 @@ import com.lvsaber.bilitv.data.BiliApiClient
 import com.lvsaber.bilitv.data.BiliApiException
 import com.lvsaber.bilitv.data.PgcCategory
 import com.lvsaber.bilitv.data.PgcEpisode
+import com.lvsaber.bilitv.data.PgcHomeFeedCache
 import com.lvsaber.bilitv.data.PgcIndexPage
 import com.lvsaber.bilitv.data.PgcJsonParser
 import com.lvsaber.bilitv.data.PgcPagingPolicy
 import com.lvsaber.bilitv.data.PgcProgress
 import com.lvsaber.bilitv.data.PgcSeason
+import java.util.concurrent.Callable
 import com.lvsaber.bilitv.data.PgcTimelineDay
 import com.lvsaber.bilitv.data.PgcTimelineItem
 import com.lvsaber.bilitv.data.ProgressRepository
@@ -52,6 +54,7 @@ class BangumiActivity : AppCompatActivity() {
     private var currentPage = "recommend"
     private var searchReturnPage = "recommend"
     private var category = PgcCategory.JAPANESE_ANIME
+    private var scheduleCategory = PgcCategory.GUOCHUANG
     private var rankingDay = 3
     private var rankingLimit = 0
     private var rankingHasMore = false
@@ -66,6 +69,7 @@ class BangumiActivity : AppCompatActivity() {
     private var indexLoading = false
     private var followingPage = 0
     private var followingHasMore = true
+    private var followingLoading = false
     private var searchPage = 0
     private var searchHasMore = false
     private var restoreIndexThroughPage = 0
@@ -88,6 +92,8 @@ class BangumiActivity : AppCompatActivity() {
         api = BiliApiClient(this)
         currentPage = savedInstanceState?.getString(STATE_PAGE) ?: "recommend"
         category = PgcCategory.fromSeasonType(savedInstanceState?.getInt(STATE_CATEGORY, 1) ?: 1) ?: PgcCategory.JAPANESE_ANIME
+        scheduleCategory = PgcCategory.fromSeasonType(savedInstanceState?.getInt(STATE_SCHEDULE_CATEGORY, PgcCategory.GUOCHUANG.seasonType)
+            ?: PgcCategory.GUOCHUANG.seasonType) ?: PgcCategory.GUOCHUANG
         rankingDay = savedInstanceState?.getInt(STATE_RANKING_DAY, 3) ?: 3
         scheduleBefore = savedInstanceState?.getInt(STATE_SCHEDULE_BEFORE, 0) ?: 0
         scheduleAfter = savedInstanceState?.getInt(STATE_SCHEDULE_AFTER, 7) ?: 7
@@ -125,6 +131,7 @@ class BangumiActivity : AppCompatActivity() {
         outState.putString(STATE_PAGE, currentPage)
         outState.putString(STATE_SEARCH_RETURN, searchReturnPage)
         outState.putInt(STATE_CATEGORY, category.seasonType)
+        outState.putInt(STATE_SCHEDULE_CATEGORY, scheduleCategory.seasonType)
         outState.putInt(STATE_RANKING_DAY, rankingDay)
         outState.putInt(STATE_SCHEDULE_BEFORE, scheduleBefore)
         outState.putInt(STATE_SCHEDULE_AFTER, scheduleAfter)
@@ -297,10 +304,12 @@ class BangumiActivity : AppCompatActivity() {
         val root = content.getChildAt(0) ?: return
         val nested = findFirst(root, NestedScrollView::class.java)
         val recycler = findFirst(root, RecyclerView::class.java)
+        val old = pagePositions[currentPage]
+        val contentFocus = currentFocus?.takeIf { isWithin(it, content) }
         pagePositions[currentPage] = PagePosition(
             scrollY = nested?.scrollY ?: 0,
             layoutState = if (nested == null) recycler?.layoutManager?.onSaveInstanceState() else null,
-            focusTag = currentFocus?.takeIf { it.rootView === window.decorView.rootView }?.tag?.toString()?.takeIf(String::isNotBlank),
+            focusTag = contentFocus?.tag?.toString()?.takeIf(String::isNotBlank) ?: old?.focusTag,
         )
     }
 
@@ -322,7 +331,7 @@ class BangumiActivity : AppCompatActivity() {
 
     private fun restoreTaggedFocus(root: View, tag: String?) {
         if (tag.isNullOrBlank()) return
-        val target = findByTag(root, tag) ?: findByTag(window.decorView, tag)
+        val target = findByTag(root, tag)
         target?.post { if (!isFinishing && !isDestroyed) target.requestFocus() }
     }
 
@@ -333,12 +342,12 @@ class BangumiActivity : AppCompatActivity() {
         findByTag(content, tag)?.requestFocus()
     }
 
-    private data class PagingFocus(val moreFocused: Boolean, val seasonId: Long?)
+    private data class PagingFocus(val seasonId: Long?)
 
-    private fun capturePagingFocus(more: View): PagingFocus {
+    private fun capturePagingFocus(): PagingFocus {
         val focusedTag = currentFocus?.tag?.toString().orEmpty()
         val seasonId = focusedTag.removePrefix("pgc-season/").toLongOrNull()
-        return PagingFocus(more.hasFocus(), seasonId)
+        return PagingFocus(seasonId)
     }
 
     private fun restorePagingFocus(focus: PagingFocus, oldCount: Int, adapter: PgcSeasonAdapter) {
@@ -347,12 +356,8 @@ class BangumiActivity : AppCompatActivity() {
             restoreCurrentPageFocus()
             return
         }
-        val targetSeasonId = if (focus.moreFocused) {
-            items.getOrNull(oldCount)?.seasonId ?: items.last().seasonId
-        } else {
-            focus.seasonId
-        }
-        val targetPosition = targetSeasonId?.let { id -> items.indexOfFirst { it.seasonId == id } } ?: -1
+        val targetSeasonId = focus.seasonId ?: items.getOrNull(oldCount)?.seasonId ?: items.last().seasonId
+        val targetPosition = items.indexOfFirst { it.seasonId == targetSeasonId }
         if (targetPosition >= 0) focusSeasonCard(targetPosition) else restoreCurrentPageFocus()
     }
 
@@ -391,37 +396,16 @@ class BangumiActivity : AppCompatActivity() {
         val scroll = NestedScrollView(this).apply { isFillViewport = true; clipToPadding = false }
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, Ui.dp(context, 8), 0, Ui.dp(context, 26))
+            setPadding(0, Ui.dp(context, 3), 0, Ui.dp(context, 18))
         }
-        val hero = buildFeaturedHero()
-        body.addView(hero.root, LinearLayout.LayoutParams(-1, Ui.dp(this, 236)))
-        body.addView(Ui.text(this, "番剧 · 日本动画与国创", 25f, Ui.text).apply { setPadding(Ui.dp(context, 8), 0, 0, Ui.dp(context, 3)) })
-        body.addView(Ui.text(this, "作品、季与集独立呈现；会员、地区和上线限制以 B 站实际权限为准。", 14f, Ui.muted))
+        body.addView(Ui.text(this, "番剧推荐", 18f, Ui.text).apply { setPadding(Ui.dp(context, 8), 0, 0, 0) },
+            LinearLayout.LayoutParams(-1, Ui.dp(this, 32)))
         val recent = repository.recentPgc().take(12).map { it.playable.toSeasonCard() }
         if (recent.isNotEmpty()) addRail(body, "继续观看", recent, repository.recentPgc())
-        val jp = addLoadingRail(body, "日本动画 · 近期排行")
-        val gc = addLoadingRail(body, "国创动画 · 近期排行")
         val airing = addLoadingRail(body, "最近放送")
         scroll.addView(body); content.addView(scroll)
         val token = pageGeneration
-        loadHomeRail(
-            token,
-            jp,
-            onLoaded = { items -> items.firstOrNull()?.let { bindFeaturedHero(hero, it) } },
-            loadMore = { limit -> api.getPgcRanking(PgcCategory.JAPANESE_ANIME, limit = limit) },
-        ) {
-            api.getPgcRanking(PgcCategory.JAPANESE_ANIME, limit = 12)
-        }
-        loadHomeRail(token, gc, loadMore = { limit -> api.getPgcRanking(PgcCategory.GUOCHUANG, limit = limit) }) {
-            api.getPgcRanking(PgcCategory.GUOCHUANG, limit = 12)
-        }
-        loadHomeRail(token, airing) {
-            val jpItems = api.getPgcTimeline(PgcCategory.JAPANESE_ANIME, before = 7, after = 7).flatMap { it.items }
-            val gcItems = api.getPgcTimeline(PgcCategory.GUOCHUANG, before = 7, after = 7).flatMap { it.items }
-            (jpItems + gcItems).distinctBy { it.season.seasonId }.map { item ->
-                item.season.copy(indexShow = item.episode.displayTitle, newestEpisode = item.airTime)
-            }
-        }
+        loadHomeTimelineRail(token, airing)
     }
 
     private class HomeRail(
@@ -436,50 +420,9 @@ class BangumiActivity : AppCompatActivity() {
         var canRequestMore = false
         var loading = false
         var requestMore: ((Int) -> List<PgcSeason>)? = null
+        var cacheKey: String? = null
         val hasMore: Boolean get() = visibleCount < items.size || canRequestMore
     }
-    private data class FeaturedHero(val root: LinearLayout, val cover: ImageView, val title: TextView, val meta: TextView,
-        val description: TextView, val action: Button)
-
-    private fun buildFeaturedHero(): FeaturedHero {
-        val compact = Ui.isCompactWidth(this)
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = Ui.panel(context)
-            setPadding(Ui.dp(context, 16), Ui.dp(context, 12), Ui.dp(context, 18), Ui.dp(context, 12))
-            visibility = View.GONE
-        }
-        val cover = Ui.poster(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
-        root.addView(cover, LinearLayout.LayoutParams(Ui.dp(this, if (compact) 104 else 300), -1).apply {
-            marginEnd = Ui.dp(this@BangumiActivity, if (compact) 10 else 18)
-        })
-        val info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_VERTICAL }
-        val kicker = Ui.text(this, "日本动画 · 近期人气", if (compact) 11f else 13f, Ui.blue)
-        val title = Ui.text(this, "", if (compact) 18f else 25f, Ui.text).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END }
-        val meta = Ui.text(this, "", if (compact) 11f else 14f, Ui.muted).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }
-        val description = Ui.text(this, "", if (compact) 12f else 14f, Ui.text).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END }
-        val action = Ui.button(this, "查看详情") {}.apply { isEnabled = false; minWidth = Ui.dp(context, if (compact) 0 else 150) }
-        info.addView(kicker)
-        info.addView(title, LinearLayout.LayoutParams(-1, Ui.dp(this, 38)))
-        info.addView(meta, LinearLayout.LayoutParams(-1, Ui.dp(this, 26)))
-        info.addView(description, LinearLayout.LayoutParams(-1, 0, 1f))
-        info.addView(action, LinearLayout.LayoutParams(-2, Ui.dp(this, 42)))
-        root.addView(info, LinearLayout.LayoutParams(0, -1, 1f))
-        return FeaturedHero(root, cover, title, meta, description, action)
-    }
-
-    private fun bindFeaturedHero(hero: FeaturedHero, season: PgcSeason) {
-        CoverLoader.load(hero.cover, season.coverUrl)
-        hero.title.text = season.title
-        hero.meta.text = listOf(season.score.takeIf(String::isNotBlank)?.let { "评分 $it" }, season.indexShow,
-            if (season.isFinished) "已完结" else "连载中").filterNotNull().filter(String::isNotBlank).joinToString(" · ")
-        hero.description.text = season.description.ifBlank { season.badge.takeIf(String::isNotBlank) ?: "根据近期日本动画排行榜生成的非个性化精选。" }
-        hero.action.setOnClickListener { openDetail(season.seasonId) }
-        hero.action.isEnabled = true
-        hero.root.visibility = View.VISIBLE
-    }
-
     private fun addLoadingRail(body: LinearLayout, title: String): HomeRail {
         body.addView(Ui.text(this, title, 19f, Ui.text).apply { setPadding(Ui.dp(context, 8), Ui.dp(context, 10), 0, Ui.dp(context, 5)) })
         val status = Ui.text(this, "正在加载…", 13f, Ui.muted)
@@ -521,39 +464,42 @@ class BangumiActivity : AppCompatActivity() {
         rail.status.visibility = View.GONE
     }
 
-    private fun loadHomeRail(
-        token: Int,
-        rail: HomeRail,
-        onLoaded: (List<PgcSeason>) -> Unit = {},
-        loadMore: ((Int) -> List<PgcSeason>)? = null,
-        request: () -> List<PgcSeason>,
-    ) {
+    private fun loadHomeTimelineRail(token: Int, rail: HomeRail) {
+        val cacheKey = "timeline:0:7"
+        rail.cacheKey = cacheKey
+        PgcHomeFeedCache.get(cacheKey)?.let { cached ->
+            rail.items = cached.distinctBy { it.seasonId }
+            rail.visibleCount = minOf(RAIL_BATCH_SIZE, rail.items.size)
+            rail.adapter.submitList(rail.items.take(rail.visibleCount))
+            rail.status.visibility = View.GONE
+        }
         rail.loading = true
-        rail.requestMore = loadMore
+        rail.status.text = if (rail.items.isEmpty()) "正在加载…" else ""
+        rail.status.visibility = if (rail.items.isEmpty()) View.VISIBLE else View.GONE
         AppExecutors.io.execute {
-            val result = runCatching(request)
+            val result = runCatching {
+                val japanese = AppExecutors.browse.submit(Callable {
+                    api.getPgcTimeline(PgcCategory.JAPANESE_ANIME, before = 7, after = 7)
+                })
+                val guochuang = AppExecutors.browse.submit(Callable {
+                    api.getPgcTimeline(PgcCategory.GUOCHUANG, before = 7, after = 7)
+                })
+                (japanese.get().flatMap { it.items } + guochuang.get().flatMap { it.items })
+                    .distinctBy { it.season.seasonId }
+                    .map { item -> item.season.copy(indexShow = item.episode.displayTitle, newestEpisode = item.airTime) }
+            }
             runOnUiThread {
                 if (token != pageGeneration || isFinishing || isDestroyed) return@runOnUiThread
+                rail.loading = false
                 result.onSuccess { items ->
-                    onLoaded(items)
-                    rail.loading = false
-                    rail.items = items.distinctBy { it.seasonId }
-                    rail.visibleCount = minOf(RAIL_BATCH_SIZE, rail.items.size)
-                    rail.requestedLimit = 12
-                    rail.canRequestMore = loadMore != null && rail.items.size >= rail.requestedLimit
-                    rail.adapter.submitList(rail.items.take(rail.visibleCount)) { restoreCurrentPageFocus() }
-                    rail.status.text = if (items.isEmpty()) "暂无内容" else ""
+                    rail.items = items
+                    rail.visibleCount = minOf(RAIL_BATCH_SIZE, items.size)
+                    PgcHomeFeedCache.put(cacheKey, items)
+                    rail.adapter.submitList(items.take(rail.visibleCount)) { restoreCurrentPageFocus() }
+                    rail.status.text = if (items.isEmpty()) "近期没有放送条目" else ""
                     rail.status.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
-                    rail.list.post {
-                        val manager = rail.list.layoutManager as? LinearLayoutManager ?: return@post
-                        val lastVisible = manager.findLastVisibleItemPosition()
-                        if (PgcPagingPolicy.shouldLoadMore(lastVisible, rail.adapter.itemCount, 1, rail.hasMore, rail.loading, 4)) {
-                            appendHomeRailBatch(rail)
-                        }
-                    }
                 }.onFailure { error ->
-                    rail.loading = false
-                    rail.status.text = "加载失败：${friendlyMessage(error)}"
+                    rail.status.text = if (rail.items.isEmpty()) "加载失败：${friendlyMessage(error)}" else "已显示缓存内容 · 更新失败：${friendlyMessage(error)}"
                     rail.status.visibility = View.VISIBLE
                 }
             }
@@ -585,6 +531,7 @@ class BangumiActivity : AppCompatActivity() {
                     rail.requestedLimit = requestedLimit
                     rail.items = response.distinctBy { it.seasonId }
                     rail.canRequestMore = rail.items.size > previousCount && response.size >= requestedLimit && requestedLimit < PgcPagingPolicy.MAX_RANKING_ITEMS
+                    rail.cacheKey?.let { PgcHomeFeedCache.put(it, rail.items) }
                     rail.visibleCount = PgcPagingPolicy.nextVisibleCount(rail.visibleCount, rail.items.size, RAIL_BATCH_SIZE)
                     rail.adapter.submitList(rail.items.take(rail.visibleCount)) { restoreCurrentPageFocus() }
                 }.onFailure { error ->
@@ -600,9 +547,9 @@ class BangumiActivity : AppCompatActivity() {
         val filters = horizontalRow()
         val categoryButtons = mutableMapOf<PgcCategory, Button>()
         PgcCategory.entries.forEach { value ->
-            val button = Ui.chip(this, value.label, category == value) {
-                category = value
-                categoryButtons.forEach { (candidate, chip) -> Ui.setChipSelected(chip, candidate == category) }
+            val button = Ui.chip(this, value.label, scheduleCategory == value) {
+                scheduleCategory = value
+                categoryButtons.forEach { (candidate, chip) -> Ui.setChipSelected(chip, candidate == scheduleCategory) }
                 showPage("schedule")
             }.apply { tag = "pgc-category-${value.seasonType}" }
             categoryButtons[value] = button
@@ -647,7 +594,7 @@ class BangumiActivity : AppCompatActivity() {
         wireScheduleFilterFocus(categoryButtons, rangeButtons, list, adapter, columns)
         val token = pageGeneration
         AppExecutors.io.execute {
-            val result = runCatching { api.getPgcTimeline(category, before = scheduleBefore, after = scheduleAfter) }
+            val result = runCatching { api.getPgcTimeline(scheduleCategory, before = scheduleBefore, after = scheduleAfter) }
             runOnUiThread {
                 if (!isCurrent(token)) return@runOnUiThread
                 result.onSuccess { days ->
@@ -658,7 +605,7 @@ class BangumiActivity : AppCompatActivity() {
                         }
                     }
                     adapter.submitList(rows) { restoreCurrentPageFocus() }
-                    status.text = if (rows.none { it.season != null }) "近期没有放送条目" else "${category.label} · 按日期分组"
+                    status.text = if (rows.none { it.season != null }) "近期没有放送条目" else "${scheduleCategory.label} · 按日期分组"
                 }.onFailure { status.text = "放送表加载失败：${friendlyMessage(it)}" }
             }
         }
@@ -694,7 +641,7 @@ class BangumiActivity : AppCompatActivity() {
     }
 
     private fun focusScheduleCategory(): Boolean =
-        findByTag(content, "pgc-category-${category.seasonType}")?.requestFocus() ?: false
+        findByTag(content, "pgc-category-${scheduleCategory.seasonType}")?.requestFocus() ?: false
 
     private fun focusScheduleRange(): Boolean =
         findByTag(content, "pgc-schedule-range-${scheduleRange()}")?.requestFocus() ?: false
@@ -748,6 +695,7 @@ class BangumiActivity : AppCompatActivity() {
         val grid = seasonGrid { openDetail(it.seasonId) }
         root.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
         val more = Ui.chip(this, "加载更多", false) { loadRankingPage(reset = false) }
+        more.visibility = View.GONE
         currentMore = more
         root.addView(more, LinearLayout.LayoutParams(-1, Ui.dp(this, 42)))
         content.addView(root)
@@ -762,7 +710,7 @@ class BangumiActivity : AppCompatActivity() {
             setPadding(0, Ui.dp(this@BangumiActivity, 5), 0, Ui.dp(this@BangumiActivity, 8))
         }
         val heading = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        heading.addView(Ui.text(this, "番剧索引", 21f, Ui.text), LinearLayout.LayoutParams(-2, Ui.dp(this, 42)))
+        heading.addView(Ui.text(this, "番剧索引", 18f, Ui.text), LinearLayout.LayoutParams(-2, Ui.dp(this, 34)))
         val summary = Ui.text(this, size = 11f, color = Ui.muted).apply {
             setSingleLine(true)
             ellipsize = android.text.TextUtils.TruncateAt.END
@@ -770,7 +718,7 @@ class BangumiActivity : AppCompatActivity() {
             setPadding(Ui.dp(this@BangumiActivity, 8), 0, Ui.dp(this@BangumiActivity, 8), 0)
         }
         indexFilterSummary = summary
-        heading.addView(summary, LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1f))
+        heading.addView(summary, LinearLayout.LayoutParams(0, Ui.dp(this, 34), 1f))
         val filterButton = Ui.chip(this, "筛选", false) { showIndexFilterPanel() }.apply { tag = "pgc-index-filter" }
         indexFilterButton = filterButton
         heading.addView(filterButton)
@@ -784,6 +732,7 @@ class BangumiActivity : AppCompatActivity() {
         val grid = seasonGrid { openDetail(it.seasonId) }
         root.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
         val more = Ui.chip(this, "加载更多", false) { loadIndexPage(false) }; currentMore = more
+        more.visibility = View.GONE
         root.addView(more, LinearLayout.LayoutParams(-1, Ui.dp(this, 36)))
         content.addView(root)
         observeGridPaging(grid, { indexHasMore }, { indexLoading }) { loadIndexPage(reset = false) }
@@ -867,7 +816,7 @@ class BangumiActivity : AppCompatActivity() {
         val status = currentStatus ?: return
         val more = currentMore ?: return
         if (!reset && (!rankingHasMore || rankingLoading)) return
-        val pagingFocus = if (reset) null else capturePagingFocus(more)
+        val pagingFocus = if (reset) null else capturePagingFocus()
         val oldCount = adapter.currentList.size
         val token = pageGeneration
         val requestedLimit = if (reset) PgcPagingPolicy.BATCH_SIZE else PgcPagingPolicy.nextRankingLimit(rankingLimit)
@@ -891,7 +840,7 @@ class BangumiActivity : AppCompatActivity() {
                     rankingLimit = requestedLimit
                     rankingHasMore = items.size > oldCount && items.size >= requestedLimit && requestedLimit < PgcPagingPolicy.MAX_RANKING_ITEMS
                     more.text = "加载更多"
-                    more.visibility = if (rankingHasMore) View.VISIBLE else View.GONE
+                    more.visibility = View.GONE
                     adapter.submitList(items) {
                         pagingFocus?.let { restorePagingFocus(it, oldCount, adapter) } ?: restoreCurrentPageFocus()
                         gridPrefetchAfterPageLoaded()
@@ -921,6 +870,10 @@ class BangumiActivity : AppCompatActivity() {
                     manager.findLastVisibleItemPosition(), grid.adapter?.itemCount ?: 0, manager.spanCount, rankingHasMore, rankingLoading,
                 )
             ) loadRankingPage(reset = false)
+            else if (currentPage == "following" && PgcPagingPolicy.shouldLoadMore(
+                    manager.findLastVisibleItemPosition(), grid.adapter?.itemCount ?: 0, manager.spanCount, followingHasMore, followingLoading,
+                )
+            ) loadFollowingPage(reset = false)
         }
     }
 
@@ -929,7 +882,7 @@ class BangumiActivity : AppCompatActivity() {
         val status = currentStatus ?: return
         val more = currentMore ?: return
         if (!reset && (!indexHasMore || indexLoading)) return
-        val pagingFocus = if (reset) null else capturePagingFocus(more)
+        val pagingFocus = if (reset) null else capturePagingFocus()
         val oldCount = adapter.currentList.size
         val token = pageGeneration
         val requestedPage = if (reset) 1 else indexPage + 1
@@ -944,7 +897,7 @@ class BangumiActivity : AppCompatActivity() {
                 result.onSuccess { page ->
                     val items = if (reset) page.items else adapter.currentList + page.items.filterNot { incoming -> adapter.currentList.any { it.seasonId == incoming.seasonId } }
                     indexPage = requestedPage; indexHasMore = page.hasNext
-                    more.visibility = if (indexHasMore) View.VISIBLE else View.GONE
+                    more.visibility = View.GONE
                     adapter.submitList(items) {
                         pagingFocus?.let { restorePagingFocus(it, oldCount, adapter) } ?: restoreCurrentPageFocus()
                         gridPrefetchAfterPageLoaded()
@@ -964,14 +917,16 @@ class BangumiActivity : AppCompatActivity() {
         val grid = seasonGrid { openDetail(it.seasonId, followStatus = it.followStatus) }
         root.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f)); content.addView(root)
         val more = Ui.chip(this, "加载更多", false) { loadFollowingPage(reset = false) }; currentMore = more
+        more.visibility = View.GONE
         root.addView(more, LinearLayout.LayoutParams(-1, Ui.dp(this, 42)))
+        observeGridPaging(grid, { followingHasMore }, { followingLoading }) { loadFollowingPage(reset = false) }
         resetFollowing(preserveRestore = true)
     }
 
     private fun showSearch() {
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, Ui.dp(context, 8), 0, 0) }
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, Ui.dp(context, 2), 0, 0) }
         val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        header.addView(Ui.text(this, "搜索番剧", 21f, Ui.text), LinearLayout.LayoutParams(0, Ui.dp(this, 44), 1f))
+        header.addView(Ui.text(this, "搜索番剧", 18f, Ui.text), LinearLayout.LayoutParams(0, Ui.dp(this, 34), 1f))
         header.addView(Ui.chip(this, "返回", false) { showPage(searchReturnPage) })
         root.addView(header)
         val filter = categoryFilters { resetSearch(pendingSearch) }
@@ -1012,7 +967,7 @@ class BangumiActivity : AppCompatActivity() {
         val more = currentMore ?: return
         if (keyword.isBlank()) { status.text = "请输入番剧名称"; return }
         if (!reset && !searchHasMore) return
-        val pagingFocus = if (reset) null else capturePagingFocus(more)
+        val pagingFocus = if (reset) null else capturePagingFocus()
         val oldCount = adapter.currentList.size
         val token = pageGeneration
         val requestedPage = if (reset) 1 else searchPage + 1
@@ -1049,7 +1004,7 @@ class BangumiActivity : AppCompatActivity() {
     private fun resetFollowing(preserveRestore: Boolean = false) {
         pageGeneration++
         if (!preserveRestore) restoreFollowingThroughPage = 0
-        followingPage = 0; followingHasMore = true
+        followingPage = 0; followingHasMore = true; followingLoading = false
         currentAdapter?.submitList(emptyList())
         loadFollowingPage(reset = true)
     }
@@ -1058,29 +1013,33 @@ class BangumiActivity : AppCompatActivity() {
         val status = currentStatus ?: return
         val adapter = currentAdapter ?: return
         val more = currentMore ?: return
-        if (!reset && !followingHasMore) return
-        val pagingFocus = if (reset) null else capturePagingFocus(more)
+        if (followingLoading || (!reset && !followingHasMore)) return
+        val pagingFocus = if (reset) null else capturePagingFocus()
         val oldCount = adapter.currentList.size
         val token = pageGeneration
         val requestedPage = if (reset) 1 else followingPage + 1
+        followingLoading = true
         more.isEnabled = false; status.text = "正在加载追番列表第 $requestedPage 页…"
         AppExecutors.io.execute {
             val result = runCatching { api.getPgcFollowing(category, requestedPage) }
             runOnUiThread {
                 if (!isCurrent(token)) return@runOnUiThread
+                followingLoading = false
                 more.isEnabled = true
                 result.onSuccess { page ->
                     val items = if (reset) page.items else adapter.currentList + page.items.filterNot { incoming -> adapter.currentList.any { it.seasonId == incoming.seasonId } }
                     followingPage = requestedPage; followingHasMore = page.hasNext
-                    more.text = "加载更多"; more.visibility = if (followingHasMore) View.VISIBLE else View.GONE
+                    more.text = "加载更多"; more.visibility = View.GONE
                     more.setOnClickListener { loadFollowingPage(reset = false) }
                     adapter.submitList(items) {
                         pagingFocus?.let { restorePagingFocus(it, oldCount, adapter) } ?: restoreCurrentPageFocus()
+                        gridPrefetchAfterPageLoaded()
                     }
-                    status.text = if (items.isEmpty()) "暂无追番作品" else "已加载 ${items.size} 部 · ${category.label}${if (followingHasMore) "" else " · 已到末尾"}"
+                    status.text = if (items.isEmpty()) "暂无追番作品" else "已加载 ${items.size} 部 · ${category.label}${if (followingHasMore) " · 下滑加载更多" else " · 已到末尾"}"
                     if (followingPage < restoreFollowingThroughPage && followingHasMore) loadFollowingPage(reset = false)
                     else restoreFollowingThroughPage = 0
                 }.onFailure { error ->
+                    followingLoading = false
                     more.text = "重试"; more.visibility = View.VISIBLE
                     more.setOnClickListener { loadFollowingPage(reset) }
                     status.text = when (error) {
@@ -1093,10 +1052,11 @@ class BangumiActivity : AppCompatActivity() {
     }
 
     private fun listPage(title: String, refresh: () -> Unit): LinearLayout {
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, Ui.dp(context, 5), 0, Ui.dp(context, 12)) }
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, Ui.dp(context, 2), 0, Ui.dp(context, 8)) }
         val heading = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        heading.addView(Ui.text(this, title, 21f, Ui.text), LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1f))
-        heading.addView(Ui.chip(this, "刷新", false) { refresh() })
+        heading.addView(Ui.text(this, title, 18f, Ui.text).apply { setPadding(Ui.dp(context, 8), 0, 0, 0) },
+            LinearLayout.LayoutParams(0, Ui.dp(this, 34), 1f))
+        heading.addView(Ui.chip(this, "刷新", false) { refresh() }.apply { minHeight = Ui.dp(context, 32) })
         root.addView(heading)
         return root
     }
@@ -1186,6 +1146,7 @@ class BangumiActivity : AppCompatActivity() {
         private const val STATE_PAGE = "bangumi_page"
         private const val STATE_SEARCH_RETURN = "bangumi_search_return"
         private const val STATE_CATEGORY = "bangumi_category"
+        private const val STATE_SCHEDULE_CATEGORY = "bangumi_schedule_category"
         private const val STATE_RANKING_DAY = "bangumi_ranking_day"
         private const val STATE_SCHEDULE_BEFORE = "bangumi_schedule_before"
         private const val STATE_SCHEDULE_AFTER = "bangumi_schedule_after"

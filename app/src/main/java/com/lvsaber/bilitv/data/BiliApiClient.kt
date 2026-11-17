@@ -3,6 +3,7 @@ package com.lvsaber.bilitv.data
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
+import com.lvsaber.bilitv.core.AppExecutors
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
@@ -10,6 +11,7 @@ import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Callable
 import kotlin.math.max
 
 internal fun pgcIndexYearRange(year: Int?): String? =
@@ -669,22 +671,44 @@ class BiliApiClient(context: Context) {
         // The ranking feed includes non-Japanese anime and omits `areas`.
         // Verify ranked candidates from season detail, stopping once the
         // requested number of Japanese entries has been collected.
+        val candidates = (0 until list.length()).mapNotNull { index ->
+            PgcJsonParser.parseSeasonCard(list.optJSONObject(index) ?: return@mapNotNull null, category.seasonType, allowUnknownScope = true)
+        }
         val result = mutableListOf<PgcSeason>()
         var verificationError: Exception? = null
-        for (index in 0 until list.length()) {
-            val raw = list.optJSONObject(index) ?: continue
-            val card = PgcJsonParser.parseSeasonCard(raw, category.seasonType, allowUnknownScope = true) ?: continue
-            val verified = if (card.scopeVerified) card else {
-                val metadata = pgcScopeCache[card.seasonId] ?: try {
-                    loadPgcSeasonScope(card.seasonId)
+        var candidateIndex = 0
+        while (candidateIndex < candidates.size && result.size < maxItems) {
+            val unresolved = mutableListOf<PgcSeason>()
+            while (candidateIndex < candidates.size && unresolved.size < PGC_SCOPE_VERIFY_PARALLELISM && result.size < maxItems) {
+                val card = candidates[candidateIndex++]
+                if (card.scopeVerified) {
+                    if (card.category == category) result += card
+                    continue
+                }
+                val cached = pgcScopeCache[card.seasonId]
+                if (cached != null) {
+                    PgcJsonParser.applyVerifiedScope(card, cached)?.takeIf { it.category == category }?.let(result::add)
+                } else unresolved += card
+            }
+            if (unresolved.isEmpty()) continue
+            // Resolve only three candidates at a time; order is retained while their
+            // independent season-detail lookups run concurrently on the bounded browse pool.
+            val pending = unresolved.map { card ->
+                card to runCatching {
+                    AppExecutors.browse.submit(Callable { loadPgcSeasonScope(card.seasonId) })
+                }.getOrNull()
+            }
+            pending.forEach { (card, future) ->
+                val metadata = try {
+                    if (future == null) loadPgcSeasonScope(card.seasonId) else future.get()
                 } catch (error: Exception) {
-                    if (error !is BiliApiException || error.apiCode != -422) verificationError = verificationError ?: error
+                    val cause = error.cause as? Exception ?: error
+                    if (cause !is BiliApiException || cause.apiCode != -422) verificationError = verificationError ?: cause
                     null
                 }
                 metadata?.let { PgcJsonParser.applyVerifiedScope(card, it) }
+                    ?.takeIf { it.category == category }?.let(result::add)
             }
-            if (verified != null && verified.category == category) result += verified
-            if (result.size >= maxItems) break
         }
         if (result.isEmpty()) verificationError?.let { throw it }
         return result
@@ -1041,7 +1065,40 @@ class BiliApiClient(context: Context) {
             mapOf("platform" to "web", "web_location" to "333.1007"),
         )
         requireLiveSuccess(root)
+        // Some response variants omit live_status; the UI resolves those through the
+        // public batch-status endpoint instead of treating omission as proof of live.
         return LiveApiParser.rooms(root)
+    }
+
+    /** Refreshes saved-room badges in one public batch request; no login cookie is sent. */
+    fun getLiveRoomStatuses(anchorMids: Collection<Long>): Map<Long, LiveRoomSummary> {
+        val mids = anchorMids.asSequence().filter { it > 0L }.distinct().take(50).toList()
+        if (mids.isEmpty()) return emptyMap()
+        val connection = URL("$LIVE_BASE_URL/room/v1/Room/get_status_info_by_uids").openConnection() as HttpURLConnection
+        return try {
+            connection.connectTimeout = 15_000
+            connection.readTimeout = 20_000
+            connection.requestMethod = "POST"
+            connection.doOutput = true
+            connection.setRequestProperty("Accept", "application/json, text/plain, */*")
+            connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+            connection.setRequestProperty("User-Agent", USER_AGENT)
+            connection.setRequestProperty("Referer", LIVE_REFERER)
+            connection.setRequestProperty("Origin", "https://live.bilibili.com")
+            val body = JSONObject().put("uids", JSONArray(mids)).toString().toByteArray(StandardCharsets.UTF_8)
+            connection.outputStream.use { it.write(body) }
+            val response = readResponse(connection)
+            val root = runCatching { JSONObject(response.body) }.getOrElse {
+                throw BiliApiException(response.httpCode, "B 站未返回有效的直播状态数据", response.httpCode)
+            }
+            val code = root.optInt("code", 0)
+            if (response.httpCode !in 200..299 || code != 0) {
+                throw BiliApiException(code.takeIf { it != 0 } ?: response.httpCode, root.optString("message", "直播状态刷新失败"), response.httpCode)
+            }
+            LiveApiParser.roomStatuses(root)
+        } finally {
+            connection.disconnect()
+        }
     }
 
     /** Category ordering is server supplied: live_time (new starts) or online (popularity). */
@@ -1446,6 +1503,7 @@ class BiliApiClient(context: Context) {
         private const val LIVE_REFERER = "https://live.bilibili.com/"
         private const val LIVE_SEARCH_REFERER = "https://search.bilibili.com/live"
         private const val LIVE_PAGE_SIZE = 20
+        private const val PGC_SCOPE_VERIFY_PARALLELISM = 3
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 13; Tablet) AppleWebKit/537.36 " +
                 "Chrome/131.0.0.0 Mobile Safari/537.36"

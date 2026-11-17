@@ -33,9 +33,11 @@ import com.lvsaber.bilitv.data.AppSettings
 import com.lvsaber.bilitv.data.BiliApiClient
 import com.lvsaber.bilitv.data.BiliApiException
 import com.lvsaber.bilitv.data.LiveCodecPreference
+import com.lvsaber.bilitv.data.LiveControlsPolicy
 import com.lvsaber.bilitv.data.LiveDanmakuClient
 import com.lvsaber.bilitv.data.LiveDanmakuState
 import com.lvsaber.bilitv.data.LiveLibraryRepository
+import com.lvsaber.bilitv.data.LiveOverlayBackAction
 import com.lvsaber.bilitv.data.LivePlaybackAttempt
 import com.lvsaber.bilitv.data.LiveProtocolPreference
 import com.lvsaber.bilitv.data.LiveQualityOption
@@ -80,6 +82,8 @@ class LivePlayerActivity : AppCompatActivity() {
     private var automaticRetriesUsed = 0
     private var currentQualityId = 0
     private var controlsVisible = false
+    private var playbackErrorMessage: String? = null
+    private var activeChoiceDialog: androidx.appcompat.app.AlertDialog? = null
     private var firstFrameRendered = false
     private var sessionGeneration = 0
     private var streamGeneration = 0
@@ -107,7 +111,16 @@ class LivePlayerActivity : AppCompatActivity() {
         showControls(focusFirst = true)
         loadRoom(roomId)
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() { finish() }
+            override fun handleOnBackPressed() {
+                when (LiveControlsPolicy.backAction(
+                    dialogOpen = activeChoiceDialog?.isShowing == true,
+                    controlsVisible = controlsVisible || errorPanel.visibility == View.VISIBLE,
+                )) {
+                    LiveOverlayBackAction.DISMISS_DIALOG -> activeChoiceDialog?.dismiss()
+                    LiveOverlayBackAction.HIDE_CONTROLS -> hideControls()
+                    LiveOverlayBackAction.EXIT_PLAYER -> finish()
+                }
+            }
         })
     }
 
@@ -269,6 +282,7 @@ class LivePlayerActivity : AppCompatActivity() {
     private fun requestStream(requestedQuality: Int) {
         val currentRoom = room ?: return
         val token = ++streamGeneration
+        playbackErrorMessage = null
         firstFrameRendered = false
         status.text = "正在获取直播流…"
         status.visibility = View.VISIBLE
@@ -324,6 +338,7 @@ class LivePlayerActivity : AppCompatActivity() {
 
     private fun playAttempt(attempt: LivePlaybackAttempt, automatic: Boolean) {
         val currentRoom = room ?: return
+        playbackErrorMessage = null
         Log.i(TAG, "Starting live qn=${attempt.profile.qualityId} protocol=${attempt.profile.protocol} codec=${attempt.profile.codec} route=${attempt.route.label} automatic=$automatic retry=$automaticRetriesUsed")
         releasePlayerOnly()
         errorPanel.visibility = View.GONE
@@ -422,9 +437,8 @@ class LivePlayerActivity : AppCompatActivity() {
 
     private fun showPlaybackError(message: String) {
         firstFrameRendered = false
-        status.visibility = View.GONE
+        playbackErrorMessage = message
         errorText.text = message
-        errorPanel.visibility = View.VISIBLE
         val hasAlternates = attempts.size > 1
         errorPanel.getChildAt(1)?.let { actions ->
             if (actions is LinearLayout && actions.childCount > 1) actions.getChildAt(1).isEnabled = hasAlternates
@@ -435,7 +449,7 @@ class LivePlayerActivity : AppCompatActivity() {
 
     private fun showFatal(message: String) {
         releasePlayerOnly()
-        status.visibility = View.GONE
+        playbackErrorMessage = message
         errorText.text = message
         errorPanel.visibility = View.VISIBLE
         errorPanel.getChildAt(1)?.let { actions -> if (actions is LinearLayout && actions.childCount > 1) actions.getChildAt(1).isEnabled = false }
@@ -551,10 +565,16 @@ class LivePlayerActivity : AppCompatActivity() {
 
     private fun showChoiceDialog(title: String, items: List<String>, onSelected: (Int) -> Unit) {
         if (items.isEmpty()) return
-        androidx.appcompat.app.AlertDialog.Builder(this)
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle(title)
             .setItems(items.toTypedArray()) { _, which -> onSelected(which) }
-            .show()
+            .create()
+        activeChoiceDialog = dialog
+        dialog.setOnDismissListener {
+            if (activeChoiceDialog === dialog) activeChoiceDialog = null
+            armControlsTimeout()
+        }
+        dialog.show()
         showControls(focusFirst = false)
     }
 
@@ -598,23 +618,56 @@ class LivePlayerActivity : AppCompatActivity() {
 
     private fun showControls(focusFirst: Boolean) {
         controlsVisible = true
+        controls.animate().cancel()
+        header.animate().cancel()
+        errorPanel.animate().cancel()
+        controls.alpha = 1f
+        header.alpha = 1f
         controls.visibility = View.VISIBLE
         header.visibility = View.VISIBLE
-        if (focusFirst) playButton.requestFocus()
+        if (playbackErrorMessage != null) {
+            errorText.text = playbackErrorMessage
+            errorPanel.alpha = 1f
+            errorPanel.visibility = View.VISIBLE
+            status.visibility = View.GONE
+        } else {
+            errorPanel.visibility = View.GONE
+        }
+        if (focusFirst) {
+            if (playbackErrorMessage != null) focusRetryAction() else playButton.requestFocus()
+        }
         armControlsTimeout()
     }
 
     private fun hideControls() {
-        if (currentFocus != null && isInside(controls, currentFocus!!)) controls.clearFocus()
+        if (currentFocus != null && (isInside(controls, currentFocus!!) || isInside(errorPanel, currentFocus!!))) currentFocus?.clearFocus()
+        controls.clearFocus()
+        errorPanel.clearFocus()
         controlsVisible = false
-        controls.visibility = View.GONE
-        header.visibility = View.GONE
-        if (errorPanel.visibility != View.VISIBLE) playerView.requestFocus()
+        controls.animate().cancel()
+        header.animate().cancel()
+        errorPanel.animate().cancel()
+        controls.animate().alpha(0f).setDuration(CONTROLS_FADE_MS).withEndAction {
+            if (!controlsVisible) { controls.visibility = View.GONE; controls.alpha = 1f }
+        }.start()
+        header.animate().alpha(0f).setDuration(CONTROLS_FADE_MS).withEndAction {
+            if (!controlsVisible) { header.visibility = View.GONE; header.alpha = 1f }
+        }.start()
+        if (playbackErrorMessage != null) {
+            status.text = playbackErrorMessage
+            status.visibility = View.VISIBLE
+            errorPanel.animate().alpha(0f).setDuration(CONTROLS_FADE_MS).withEndAction {
+                if (!controlsVisible) { errorPanel.visibility = View.GONE; errorPanel.alpha = 1f }
+            }.start()
+        } else {
+            errorPanel.visibility = View.GONE
+        }
+        playerView.requestFocus()
     }
 
     private fun armControlsTimeout() {
         mainHandler.removeCallbacks(controlsTimeout)
-        if (controlsVisible && player?.isPlaying == true && errorPanel.visibility != View.VISIBLE) {
+        if (LiveControlsPolicy.shouldArmHideTimeout(controlsVisible, activeChoiceDialog?.isShowing == true)) {
             mainHandler.postDelayed(controlsTimeout, CONTROLS_HIDE_DELAY_MS)
         }
     }
@@ -688,5 +741,6 @@ class LivePlayerActivity : AppCompatActivity() {
         private const val PLAYER_USER_AGENT = "Mozilla/5.0 (Linux; Android TV) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"
         private const val START_TIMEOUT_MS = 12_000L
         private const val CONTROLS_HIDE_DELAY_MS = 5_000L
+        private const val CONTROLS_FADE_MS = 180L
     }
 }

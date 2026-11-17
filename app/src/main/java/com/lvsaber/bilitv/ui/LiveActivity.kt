@@ -13,6 +13,7 @@ import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
@@ -27,11 +28,13 @@ import com.lvsaber.bilitv.data.BiliApiClient
 import com.lvsaber.bilitv.data.BiliApiException
 import com.lvsaber.bilitv.data.LiveArea
 import com.lvsaber.bilitv.data.LiveLibraryRepository
+import com.lvsaber.bilitv.data.LiveRecommendationPolicy
 import com.lvsaber.bilitv.data.LiveRoomSummary
 
 @UnstableApi
 class LiveActivity : AppCompatActivity() {
     private data class PageSnapshot(val gridState: Parcelable? = null, val focusTag: String? = null)
+    private data class RoomPageResult(val rooms: List<LiveRoomSummary>, val hasMore: Boolean)
 
     private lateinit var api: BiliApiClient
     private lateinit var library: LiveLibraryRepository
@@ -53,16 +56,19 @@ class LiveActivity : AppCompatActivity() {
     private var livePage = 1
     private var canLoadMore = false
     private var loading = false
-    private var moreButton: Button? = null
+    private var recommendationRequests = 0
     private var grid: RecyclerView? = null
     private var status: TextView? = null
+    private var retryButton: Button? = null
+    private var retryAction: (() -> Unit)? = null
     private var activeAdapter: LiveGridAdapter? = null
-    private var categoryParentHost: LinearLayout? = null
-    private var categoryAreaHost: LinearLayout? = null
     private var activeSearchInput: EditText? = null
-    private var selectedParentButton: View? = null
-    private var selectedAreaButton: View? = null
     private var categoryTab: View? = null
+    private var areaFilterButton: Button? = null
+    private var categoryModeButton: Button? = null
+    private var categoryRefreshButton: Button? = null
+    private var upperContentFocus: View? = null
+    private var filterOverlay: View? = null
     private var previousSession = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -88,7 +94,8 @@ class LiveActivity : AppCompatActivity() {
         loadAreas()
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (pageKey == PAGE_SEARCH) showPage(searchReturnPage)
+                if (filterOverlay != null) closeAreaFilterPanel()
+                else if (pageKey == PAGE_SEARCH) showPage(searchReturnPage)
                 else if (pageKey != PAGE_RECOMMEND) showPage(PAGE_RECOMMEND)
                 else finish()
             }
@@ -250,21 +257,24 @@ class LiveActivity : AppCompatActivity() {
     }
 
     private fun showPage(key: String, reload: Boolean = true) {
+        if (filterOverlay != null) closeAreaFilterPanel(restoreFocus = false)
         capturePageSnapshot()
         pageKey = key
         pageGeneration++
         loading = false
         canLoadMore = false
         livePage = 1
-        moreButton = null
+        recommendationRequests = 0
         grid = null
         status = null
+        retryButton = null
+        retryAction = null
         activeAdapter = null
         activeSearchInput = null
-        selectedParentButton = null
-        selectedAreaButton = null
-        categoryParentHost = null
-        categoryAreaHost = null
+        areaFilterButton = null
+        categoryModeButton = null
+        categoryRefreshButton = null
+        upperContentFocus = null
         content.removeAllViews()
         updateNavigation()
         when (key) {
@@ -281,109 +291,222 @@ class LiveActivity : AppCompatActivity() {
     private fun showRecommendationPage() {
         val page = basePage("直播推荐")
         val actions = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        actions.addView(Ui.button(this, "刷新推荐") { loadRecommendations() })
+        val refreshButton = Ui.button(this, "刷新推荐") { loadRecommendations(reset = true) }
+        upperContentFocus = refreshButton
+        actions.addView(refreshButton)
         actions.addView(Ui.button(this, "按分区浏览") { showPage(PAGE_CATEGORIES) }.apply {
             layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(context, 42)).apply { marginStart = Ui.dp(this@LiveActivity, 8) }
         })
         page.addView(actions)
         attachStatusAndGrid(page)
         content.addView(page)
-        loadRecommendations()
+        loadRecommendations(reset = true)
     }
 
     private fun showCategoriesPage(reload: Boolean) {
         val page = basePage("直播分区")
-        page.addView(Ui.text(this, "从 B 站动态读取一级/二级分区；默认混合首页推荐与本区开播列表。", 13f, Ui.muted))
-        categoryParentHost = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        categoryAreaHost = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val parentScroll = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            addView(categoryParentHost)
-        }
-        val areaScroll = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            addView(categoryAreaHost)
-        }
-        page.addView(parentScroll, LinearLayout.LayoutParams(-1, Ui.dp(this, 44)))
-        page.addView(areaScroll, LinearLayout.LayoutParams(-1, Ui.dp(this, 44)))
         val controls = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        controls.addView(Ui.button(this, if (popularityMode) "切到分类推荐" else "人气排行") {
+        areaFilterButton = Ui.button(this, categorySelectionLabel()) { showAreaFilterPanel() }.apply {
+            tag = "live-area-filter"
+            contentDescription = "选择直播分区，${categorySelectionLabel()}"
+            layoutParams = LinearLayout.LayoutParams(0, Ui.dp(this@LiveActivity, 38), 1f)
+            setOnKeyListener { _, keyCode, event ->
+                if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_UP -> { navButtons[PAGE_CATEGORIES]?.requestFocus(); true }
+                    KeyEvent.KEYCODE_DPAD_DOWN -> { grid?.getChildAt(0)?.requestFocus(); true }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> { categoryModeButton?.requestFocus(); true }
+                    else -> false
+                }
+            }
+        }
+        upperContentFocus = areaFilterButton
+        controls.addView(areaFilterButton)
+        categoryModeButton = Ui.button(this, if (popularityMode) "分类推荐" else "人气排行") {
             popularityMode = !popularityMode
-            showPage(PAGE_CATEGORIES)
-        })
-        controls.addView(Ui.button(this, "刷新") { loadCategoryRooms(reset = true) }.apply {
-            layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(context, 42)).apply { marginStart = Ui.dp(this@LiveActivity, 8) }
-        })
+            categoryModeButton?.text = if (popularityMode) "分类推荐" else "人气排行"
+            loadCategoryRooms(reset = true)
+        }.apply {
+            tag = "live-sort-mode"
+            layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(this@LiveActivity, 38)).apply {
+                marginStart = Ui.dp(this@LiveActivity, 7)
+            }
+        }
+        controls.addView(categoryModeButton)
+        categoryModeButton?.setOnKeyListener { _, keyCode, event ->
+            if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+            when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP -> { navButtons[PAGE_CATEGORIES]?.requestFocus(); true }
+                KeyEvent.KEYCODE_DPAD_DOWN -> { grid?.getChildAt(0)?.requestFocus(); true }
+                KeyEvent.KEYCODE_DPAD_LEFT -> { areaFilterButton?.requestFocus(); true }
+                KeyEvent.KEYCODE_DPAD_RIGHT -> { categoryRefreshButton?.requestFocus(); true }
+                else -> false
+            }
+        }
+        categoryRefreshButton = Ui.button(this, "刷新") { loadCategoryRooms(reset = true) }.apply {
+            setOnKeyListener { _, keyCode, event ->
+                if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_UP -> { navButtons[PAGE_CATEGORIES]?.requestFocus(); true }
+                    KeyEvent.KEYCODE_DPAD_DOWN -> { grid?.getChildAt(0)?.requestFocus(); true }
+                    KeyEvent.KEYCODE_DPAD_LEFT -> { categoryModeButton?.requestFocus(); true }
+                    else -> false
+                }
+            }
+            layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(context, 38)).apply { marginStart = Ui.dp(this@LiveActivity, 7) }
+        }
+        controls.addView(categoryRefreshButton)
         page.addView(controls)
         attachStatusAndGrid(page)
         content.addView(page)
-        renderCategoryFilters()
         if (reload && areas.isNotEmpty()) loadCategoryRooms(reset = true)
         else if (areas.isEmpty()) setStatus("正在加载直播分区…", true)
     }
 
-    private fun renderCategoryFilters() {
-        val parents = areas.groupBy { it.parentId to it.parentName }.entries.toList()
-        if (parents.isEmpty()) {
-            categoryParentHost?.let { host -> host.removeAllViews(); host.addView(Ui.text(this, "暂无分区数据", 13f, Ui.muted)) }
+    private fun categorySelectionLabel(): String {
+        val parent = areas.firstOrNull { it.parentId == selectedParentId }?.parentName ?: "全部分区"
+        val child = areas.firstOrNull { it.areaId == selectedAreaId }?.areaName ?: "全部"
+        return if (selectedParentId == 0) "全部分区 · 全部" else "$parent · $child"
+    }
+
+    private fun updateCategoryFilterLabel() {
+        val label = categorySelectionLabel()
+        areaFilterButton?.text = label
+        areaFilterButton?.contentDescription = "选择直播分区，$label"
+    }
+
+    private fun showAreaFilterPanel() {
+        if (areas.isEmpty()) {
+            setStatus("直播分区仍在加载，稍后再试。", false)
             return
         }
-        if (parents.none { it.key.first == selectedParentId }) selectedParentId = parents.first().key.first
-        val parentHost = categoryParentHost ?: return
-        parentHost.removeAllViews()
-        parents.forEach { entry ->
-            val parentId = entry.key.first
-            val button = filterChip(entry.key.second, parentId == selectedParentId) {
-                selectedParentId = parentId
-                selectedAreaId = 0
-                renderCategoryFilters()
-                loadCategoryRooms(reset = true)
-            }
-            if (parentId == selectedParentId) selectedParentButton = button
-            button.setOnKeyListener { _, keyCode, event ->
-                if (event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_UP) {
-                    navButtons[PAGE_CATEGORIES]?.requestFocus(); true
-                } else if (event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
-                    (selectedAreaButton ?: grid?.getChildAt(0))?.requestFocus(); true
+        val parentEntries = listOf(0 to "全部分区") + areas.groupBy { it.parentId to it.parentName }.entries
+            .sortedBy { it.key.second }
+            .map { it.key.first to it.key.second }
+        var pendingParentId = selectedParentId
+        var pendingAreaId = selectedAreaId
+        if (parentEntries.none { it.first == pendingParentId }) pendingParentId = 0
+        val overlay = FrameLayout(this).apply {
+            setBackgroundColor(0xB8000000.toInt())
+            isClickable = true
+            isFocusableInTouchMode = true
+        }
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Ui.panel(context)
+            elevation = Ui.dp(context, 18).toFloat()
+            setPadding(Ui.dp(context, 16), Ui.dp(context, 12), Ui.dp(context, 16), Ui.dp(context, 12))
+        }
+        panel.addView(Ui.text(this, "选择直播分区", 18f, Ui.text), LinearLayout.LayoutParams(-1, Ui.dp(this, 34)))
+        val columns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; weightSum = 2f }
+        val parentHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val childHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val parentScroll = ScrollView(this).apply { isFillViewport = false; addView(parentHost) }
+        val childScroll = ScrollView(this).apply { isFillViewport = false; addView(childHost) }
+        columns.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(Ui.text(this@LiveActivity, "频道", 12f, Ui.muted), LinearLayout.LayoutParams(-1, Ui.dp(this@LiveActivity, 26)))
+            addView(parentScroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        }, LinearLayout.LayoutParams(0, -1, 0.82f).apply { marginEnd = Ui.dp(this@LiveActivity, 8) })
+        columns.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(Ui.text(this@LiveActivity, "子分区", 12f, Ui.muted), LinearLayout.LayoutParams(-1, Ui.dp(this@LiveActivity, 26)))
+            addView(childScroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        }, LinearLayout.LayoutParams(0, -1, 1.18f))
+        panel.addView(columns, LinearLayout.LayoutParams(-1, 0, 1f).apply {
+            topMargin = Ui.dp(this@LiveActivity, 5)
+            bottomMargin = Ui.dp(this@LiveActivity, 8)
+        })
+        var focusedParent: View? = null
+        var selectedChildButton: Button? = null
+        val parentButtons = mutableMapOf<Int, Button>()
+        val childButtons = mutableListOf<Pair<Int, Button>>()
+        fun selectChild(id: Int) {
+            pendingAreaId = id
+            childButtons.forEach { (candidate, button) -> Ui.setChipSelected(button, candidate == pendingAreaId) }
+            selectedChildButton = childButtons.firstOrNull { it.first == id }?.second
+        }
+        fun renderChildren() {
+            childHost.removeAllViews()
+            childButtons.clear()
+            selectedChildButton = null
+            val all = Ui.chip(this, "全部", pendingAreaId == 0) { selectChild(0) }
+            all.tag = "live-filter-child/0"
+            all.setOnKeyListener { _, keyCode, event ->
+                if (event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+                    focusedParent?.requestFocus(); true
                 } else false
             }
-            parentHost.addView(button)
+            childHost.addView(all, LinearLayout.LayoutParams(-1, Ui.dp(this, 38)).apply { bottomMargin = Ui.dp(this@LiveActivity, 4) })
+            childButtons += 0 to all
+            if (pendingAreaId == 0) selectedChildButton = all
+            areas.filter { pendingParentId == 0 || it.parentId == pendingParentId }
+                .sortedWith(compareByDescending<LiveArea> { it.isHot }.thenBy { it.areaName })
+                .forEach { area ->
+                    val button = Ui.chip(this, area.areaName, area.areaId == pendingAreaId) { selectChild(area.areaId) }
+                    button.tag = "live-filter-child/${area.areaId}"
+                    button.setOnKeyListener { _, keyCode, event ->
+                        if (event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+                            focusedParent?.requestFocus(); true
+                        } else false
+                    }
+                    childHost.addView(button, LinearLayout.LayoutParams(-1, Ui.dp(this, 38)).apply { bottomMargin = Ui.dp(this@LiveActivity, 4) })
+                    childButtons += area.areaId to button
+                    if (area.areaId == pendingAreaId) selectedChildButton = button
+                }
         }
-        val childHost = categoryAreaHost ?: return
-        childHost.removeAllViews()
-        val children = areas.filter { it.parentId == selectedParentId }
-            .sortedWith(compareByDescending<LiveArea> { it.isHot }.thenBy { it.areaName })
-        val allButton = filterChip("全部", selectedAreaId == 0) {
-            selectedAreaId = 0
-            renderCategoryFilters()
-            loadCategoryRooms(reset = true)
-        }
-        allButton.setOnKeyListener(categoryChildKeyListener())
-        if (selectedAreaId == 0) selectedAreaButton = allButton
-        childHost.addView(allButton)
-        children.forEach { area ->
-            val button = filterChip(area.areaName, area.areaId == selectedAreaId) {
-                selectedAreaId = area.areaId
-                renderCategoryFilters()
-                loadCategoryRooms(reset = true)
+        parentEntries.forEach { entry ->
+            val id = entry.first
+            val button = Ui.chip(this, entry.second, id == pendingParentId) {
+                pendingParentId = id
+                pendingAreaId = 0
+                parentButtons.forEach { (candidate, chip) -> Ui.setChipSelected(chip, candidate == pendingParentId) }
+                renderChildren()
+                focusedParent = parentButtons[id]
+                focusedParent?.requestFocus()
             }
-            button.setOnKeyListener(categoryChildKeyListener())
-            if (area.areaId == selectedAreaId) selectedAreaButton = button
-            childHost.addView(button)
+            button.tag = "live-filter-parent/$id"
+            button.setOnKeyListener { _, keyCode, event ->
+                if (event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    (selectedChildButton ?: childButtons.firstOrNull()?.second)?.requestFocus(); true
+                } else false
+            }
+            parentHost.addView(button, LinearLayout.LayoutParams(-1, Ui.dp(this, 38)).apply { bottomMargin = Ui.dp(this@LiveActivity, 4) })
+            parentButtons[id] = button
+            if (id == pendingParentId) focusedParent = button
         }
+        renderChildren()
+        val actions = LinearLayout(this).apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL }
+        actions.addView(Ui.button(this, "取消") { closeAreaFilterPanel() }.apply { tag = "live-filter-cancel" })
+        actions.addView(Ui.button(this, "应用") {
+            selectedParentId = pendingParentId
+            selectedAreaId = pendingAreaId.takeIf { candidate ->
+                candidate == 0 || areas.any { it.areaId == candidate && (pendingParentId == 0 || it.parentId == pendingParentId) }
+            } ?: 0
+            updateCategoryFilterLabel()
+            closeAreaFilterPanel()
+            loadCategoryRooms(reset = true)
+        }.apply {
+            tag = "live-filter-apply"
+            layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(this@LiveActivity, 42)).apply { marginStart = Ui.dp(this@LiveActivity, 8) }
+        })
+        panel.addView(actions, LinearLayout.LayoutParams(-1, Ui.dp(this, 42)))
+        val availableWidth = content.width.takeIf { it > 0 } ?: resources.displayMetrics.widthPixels
+        val availableHeight = content.height.takeIf { it > 0 } ?: resources.displayMetrics.heightPixels
+        val width = minOf(availableWidth - Ui.dp(this, 32), Ui.dp(this, if (Ui.isCompactWidth(this)) 620 else 920))
+        val height = minOf(availableHeight - Ui.dp(this, 32), Ui.dp(this, 560))
+        overlay.addView(panel, FrameLayout.LayoutParams(width.coerceAtLeast(Ui.dp(this, 300)), height.coerceAtLeast(Ui.dp(this, 280)), Gravity.CENTER))
+        content.addView(overlay, FrameLayout.LayoutParams(-1, -1))
+        filterOverlay = overlay
+        val initialFocus = selectedChildButton ?: focusedParent ?: parentButtons.values.firstOrNull()
+        initialFocus?.post { initialFocus.requestFocus() }
     }
 
-    private fun categoryChildKeyListener() = View.OnKeyListener { _, keyCode, event ->
-        if (event.action != KeyEvent.ACTION_DOWN) return@OnKeyListener false
-        when (keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP -> { selectedParentButton?.requestFocus(); true }
-            KeyEvent.KEYCODE_DPAD_DOWN -> { grid?.getChildAt(0)?.requestFocus(); true }
-            else -> false
-        }
-    }
-
-    private fun filterChip(label: String, selected: Boolean, action: () -> Unit): Button = Ui.chip(this, label, selected, action).apply {
-        layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(this@LiveActivity, 38)).apply { marginEnd = Ui.dp(this@LiveActivity, 6) }
+    private fun closeAreaFilterPanel(restoreFocus: Boolean = true) {
+        val overlay = filterOverlay ?: return
+        content.removeView(overlay)
+        filterOverlay = null
+        if (restoreFocus) areaFilterButton?.post { areaFilterButton?.requestFocus() }
     }
 
     private fun showFollowingPage() {
@@ -412,7 +535,10 @@ class LiveActivity : AppCompatActivity() {
         val page = basePage(title)
         attachStatusAndGrid(page)
         content.addView(page)
-        if (rooms.isEmpty()) setStatus(empty, false) else showRooms(rooms, empty, false)
+        if (rooms.isEmpty()) setStatus(empty, false) else {
+            showRooms(rooms, empty, false)
+            refreshLocalRoomStatuses(rooms)
+        }
     }
 
     private fun showSearchPage() {
@@ -429,7 +555,9 @@ class LiveActivity : AppCompatActivity() {
         }
         activeSearchInput = input
         row.addView(input, LinearLayout.LayoutParams(0, Ui.dp(this, 50), 1f))
-        row.addView(Ui.button(this, "搜索") { lastSearchText = input.text.toString().trim(); searchLiveRooms(reset = true) })
+        val submitButton = Ui.button(this, "搜索") { lastSearchText = input.text.toString().trim(); searchLiveRooms(reset = true) }
+        upperContentFocus = submitButton
+        row.addView(submitButton)
         input.setOnEditorActionListener { _, _, _ -> lastSearchText = input.text.toString().trim(); searchLiveRooms(reset = true); true }
         page.addView(row)
         attachStatusAndGrid(page)
@@ -441,15 +569,26 @@ class LiveActivity : AppCompatActivity() {
 
     private fun basePage(heading: String): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(0, Ui.dp(context, 8), 0, Ui.dp(context, 14))
-        addView(Ui.text(this@LiveActivity, heading, 23f, Ui.text).apply {
-            setPadding(Ui.dp(context, 8), 0, Ui.dp(context, 8), Ui.dp(context, 2))
-        })
+        setPadding(0, Ui.dp(context, 2), 0, Ui.dp(context, 8))
+        addView(Ui.text(this@LiveActivity, heading, 18f, Ui.text).apply {
+            setPadding(Ui.dp(context, 8), 0, Ui.dp(context, 8), 0)
+        }, LinearLayout.LayoutParams(-1, Ui.dp(this@LiveActivity, 34)))
     }
 
     private fun attachStatusAndGrid(parent: LinearLayout) {
         status = Ui.text(this, "", 13f, Ui.muted).apply { tag = "live-status" }
-        parent.addView(status, LinearLayout.LayoutParams(-1, Ui.dp(this, 34)))
+        val statusRow = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(status, LinearLayout.LayoutParams(0, Ui.dp(this@LiveActivity, 28), 1f))
+            val retry = Ui.button(this@LiveActivity, "重试") { retryAction?.invoke() }.apply {
+                tag = "live-retry"
+                visibility = View.GONE
+                minHeight = Ui.dp(context, 30)
+            }
+            retryButton = retry
+            addView(retry, LinearLayout.LayoutParams(-2, Ui.dp(this@LiveActivity, 30)))
+        }
+        parent.addView(statusRow, LinearLayout.LayoutParams(-1, Ui.dp(this, 30)))
         grid = RecyclerView(this).apply {
             layoutManager = GridLayoutManager(this@LiveActivity, Ui.videoColumns(this@LiveActivity))
             itemAnimator = null
@@ -458,7 +597,7 @@ class LiveActivity : AppCompatActivity() {
             overScrollMode = View.OVER_SCROLL_NEVER
             isNestedScrollingEnabled = false
         }
-        activeAdapter = LiveGridAdapter(this, library) { room -> openRoom(room) }
+        activeAdapter = LiveGridAdapter(this) { room -> openRoom(room) }
         grid?.adapter = activeAdapter
         grid?.setOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
@@ -471,13 +610,17 @@ class LiveActivity : AppCompatActivity() {
             }
         })
         parent.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
-        moreButton = Ui.button(this, "加载更多") { loadNextPage() }.apply { visibility = View.GONE }
-        parent.addView(moreButton)
         restoreGridStateWhenReady()
     }
 
-    private fun loadRecommendations() {
+    private fun loadRecommendations(reset: Boolean) {
         if (pageKey != PAGE_RECOMMEND) return
+        if (loading) return
+        if (reset) {
+            recommendationRequests = 0
+            activeAdapter?.submit(emptyList())
+            canLoadMore = false
+        }
         setStatus("正在加载直播推荐…", true)
         loading = true
         val token = pageGeneration
@@ -486,8 +629,46 @@ class LiveActivity : AppCompatActivity() {
             runOnUiThread {
                 if (token != pageGeneration || pageKey != PAGE_RECOMMEND || isDestroyed) return@runOnUiThread
                 loading = false
-                result.onSuccess { rooms -> showRooms(rooms, "当前没有可展示的直播推荐，请稍后刷新。", false) }
-                    .onFailure { showFailure(it, "直播推荐加载失败") }
+                result.onSuccess { rooms ->
+                    recommendationRequests = 1
+                    showRooms(rooms, "当前没有可展示的直播推荐，请稍后刷新。", rooms.isNotEmpty())
+                }.onFailure { showFailure(it, "直播推荐加载失败") { loadRecommendations(reset = true) } }
+            }
+        }
+    }
+
+    private fun loadMoreRecommendations(force: Boolean = false) {
+        if (pageKey != PAGE_RECOMMEND || loading || (!force && !canLoadMore)) return
+        if (recommendationRequests >= LiveRecommendationPolicy.MAX_REQUESTS_PER_VISIT) {
+            canLoadMore = false
+            setStatus("已达到本次推荐刷新上限。", false)
+            return
+        }
+        loading = true
+        setStatus("正在获取更多推荐直播…", true)
+        val token = pageGeneration
+        AppExecutors.io.execute {
+            val result = runCatching { api.getLiveRecommendations() }
+            runOnUiThread {
+                if (token != pageGeneration || pageKey != PAGE_RECOMMEND || isDestroyed) return@runOnUiThread
+                loading = false
+                result.onSuccess { rooms ->
+                    recommendationRequests++
+                    val added = activeAdapter?.append(rooms) ?: 0
+                    refreshVisibleRoomStatuses(rooms)
+                    canLoadMore = LiveRecommendationPolicy.shouldRequestNext(recommendationRequests, added)
+                    setStatus(
+                        when {
+                            added == 0 -> "已到底：推荐接口没有返回新的直播间。"
+                            canLoadMore -> "已追加 $added 个直播间 · 继续下滑加载"
+                            else -> "已追加 $added 个直播间 · 本次推荐批次已完成"
+                        },
+                        false,
+                    )
+                }.onFailure { error ->
+                    canLoadMore = false
+                    showFailure(error, "继续加载推荐失败") { loadMoreRecommendations(force = true) }
+                }
             }
         }
     }
@@ -504,32 +685,35 @@ class LiveActivity : AppCompatActivity() {
         AppExecutors.io.execute {
             val result = runCatching {
                 if (popularity) {
-                    api.getLiveCategoryRooms(parentId, areaId, requestedPage, popularity = true)
+                    val rooms = api.getLiveCategoryRooms(parentId, areaId, requestedPage, popularity = true)
+                    RoomPageResult(rooms, rooms.size >= LIVE_PAGE_SIZE)
                 } else {
                     val recommended = if (requestedPage == 1) {
                         runCatching { api.getLiveRecommendations() }.getOrDefault(emptyList())
                             .filter { room -> (areaId == 0 || room.areaId == areaId) && (parentId == 0 || room.parentAreaId == parentId) }
                     } else emptyList()
                     val localList = api.getLiveCategoryRooms(parentId, areaId, requestedPage, popularity = false)
-                    (recommended + localList).distinctBy { it.roomId }
+                    RoomPageResult((recommended + localList).distinctBy { it.roomId }, localList.size >= LIVE_PAGE_SIZE)
                 }
             }
             runOnUiThread {
                 if (token != pageGeneration || pageKey != PAGE_CATEGORIES || isDestroyed) return@runOnUiThread
                 loading = false
-                result.onSuccess { rooms ->
+                result.onSuccess { response ->
                     if (reset) {
                         livePage = 1
-                        showRooms(rooms, if (popularity) "本分区暂时没有开播房间。" else "暂无推荐直播，试试其他分区或切换人气排行。", false)
+                        showRooms(response.rooms, if (popularity) "本分区暂时没有开播房间。" else "暂无推荐直播，试试其他分区或切换人气排行。", response.hasMore)
                     } else {
                         livePage = requestedPage
-                        appendRooms(rooms)
+                        appendRooms(response.rooms)
+                        canLoadMore = response.hasMore
                     }
-                    canLoadMore = rooms.size >= LIVE_PAGE_SIZE
-                    updateMoreButton()
                 }.onFailure { error ->
-                    if (reset && activeAdapter?.itemCount == 0) showFailure(error, "该分区暂时无法加载")
-                    else setStatus("加载失败：${friendlyMessage(error)}", false)
+                    val message = if (reset && activeAdapter?.itemCount == 0) "该分区暂时无法加载" else "加载失败"
+                    showFailure(error, message) {
+                        if (!reset) canLoadMore = true
+                        loadCategoryRooms(reset)
+                    }
                 }
             }
         }
@@ -555,8 +739,12 @@ class LiveActivity : AppCompatActivity() {
                     if (reset) { livePage = 1; showRooms(rooms, "没有找到正在直播的房间。", false) }
                     else { livePage = requestedPage; appendRooms(rooms) }
                     canLoadMore = rooms.size >= LIVE_PAGE_SIZE
-                    updateMoreButton()
-                }.onFailure { showFailure(it, "直播搜索失败") }
+                }.onFailure {
+                    showFailure(it, "直播搜索失败") {
+                        if (!reset) canLoadMore = true
+                        searchLiveRooms(reset)
+                    }
+                }
             }
         }
     }
@@ -564,6 +752,7 @@ class LiveActivity : AppCompatActivity() {
     private fun loadNextPage() {
         if (!canLoadMore || loading) return
         when (pageKey) {
+            PAGE_RECOMMEND -> loadMoreRecommendations()
             PAGE_CATEGORIES -> loadCategoryRooms(reset = false)
             PAGE_SEARCH -> searchLiveRooms(reset = false)
         }
@@ -577,7 +766,6 @@ class LiveActivity : AppCompatActivity() {
                 if (isDestroyed) return@runOnUiThread
                 result.onSuccess { loaded ->
                     areas = loaded
-                    if (selectedParentId == 0) selectedParentId = loaded.firstOrNull()?.parentId ?: 0
                     if (pageKey == PAGE_CATEGORIES) {
                         showPage(PAGE_CATEGORIES)
                         if (areas.isEmpty()) setStatus("B 站没有返回直播分区。", false)
@@ -591,37 +779,59 @@ class LiveActivity : AppCompatActivity() {
 
     private fun showRooms(rooms: List<LiveRoomSummary>, emptyMessage: String, hasMore: Boolean) {
         activeAdapter?.submit(rooms)
+        refreshVisibleRoomStatuses(rooms)
         canLoadMore = hasMore
-        updateMoreButton()
         setStatus(if (rooms.isEmpty()) emptyMessage else "${rooms.size} 个直播间 · 选择卡片即可播放", false)
         restoreGridStateWhenReady()
     }
 
-    private fun appendRooms(rooms: List<LiveRoomSummary>) {
+    private fun appendRooms(rooms: List<LiveRoomSummary>): Int {
         val added = activeAdapter?.append(rooms) ?: 0
+        refreshVisibleRoomStatuses(rooms)
         setStatus(if (added == 0) "已到当前列表末尾。" else "已加载 $added 个直播间", false)
+        return added
     }
 
-    private fun showFailure(error: Throwable, fallback: String) {
+    /** Missing live_status is not evidence that a room is live; resolve visible dynamic feeds authoritatively. */
+    private fun refreshVisibleRoomStatuses(rooms: List<LiveRoomSummary>) {
+        if (pageKey !in setOf(PAGE_RECOMMEND, PAGE_CATEGORIES, PAGE_SEARCH)) return
+        val mids = rooms.asSequence().map { it.anchorMid }.filter { it > 0L }.distinct().take(50).toList()
+        if (mids.isEmpty()) return
+        val token = pageGeneration
+        val targetPage = pageKey
+        AppExecutors.io.execute {
+            val result = runCatching { api.getLiveRoomStatuses(mids) }
+            runOnUiThread {
+                if (token != pageGeneration || pageKey != targetPage || isDestroyed) return@runOnUiThread
+                result.onSuccess { activeAdapter?.updateStatuses(it) }
+            }
+        }
+    }
+
+    private fun showFailure(error: Throwable, fallback: String, retry: (() -> Unit)? = null) {
         canLoadMore = false
-        updateMoreButton()
-        setStatus("$fallback：${friendlyMessage(error)}", false)
+        val defaultRetry = retry ?: when (pageKey) {
+            PAGE_RECOMMEND -> ({ loadRecommendations(reset = true) })
+            PAGE_CATEGORIES -> ({ loadCategoryRooms(reset = true) })
+            PAGE_SEARCH -> ({ searchLiveRooms(reset = true) })
+            PAGE_FOLLOWING -> ({ showPage(PAGE_FOLLOWING, reload = true) })
+            else -> null
+        }
+        setStatus("$fallback：${friendlyMessage(error)}", false, defaultRetry)
     }
 
-    private fun setStatus(text: String, busy: Boolean) {
+    private fun setStatus(text: String, busy: Boolean, retry: (() -> Unit)? = null) {
         status?.text = if (busy) "◌  $text" else text
         status?.visibility = if (text.isBlank()) View.GONE else View.VISIBLE
-    }
-
-    private fun updateMoreButton() {
-        moreButton?.visibility = if (canLoadMore) View.VISIBLE else View.GONE
-        moreButton?.isEnabled = !loading
+        retryAction = retry
+        retryButton?.visibility = if (retry == null || busy) View.GONE else View.VISIBLE
     }
 
     private fun capturePageSnapshot() {
         if (!::content.isInitialized) return
         val currentGrid = grid
-        val focusTag = currentFocus?.tag?.toString()?.takeIf(String::isNotBlank)
+        val focusView = currentFocus?.takeIf { filterOverlay == null && isWithin(content, it) }
+        val focusTag = focusView?.tag?.toString()?.takeIf(String::isNotBlank)
         val old = pageSnapshots[pageKey]
         pageSnapshots[pageKey] = PageSnapshot(currentGrid?.layoutManager?.onSaveInstanceState() ?: old?.gridState, focusTag ?: old?.focusTag)
         activeSearchInput?.text?.toString()?.let { lastSearchText = it }
@@ -634,7 +844,35 @@ class LiveActivity : AppCompatActivity() {
             if (pageKey != restoringPage || isFinishing || isDestroyed) return@post
             state.gridState?.let { grid?.layoutManager?.onRestoreInstanceState(it) }
             state.focusTag?.let { tag ->
-                grid?.postOnAnimation { grid?.findViewWithTag<View>(tag)?.requestFocus() }
+                content.postOnAnimation { content.findViewWithTag<View>(tag)?.requestFocus() }
+            }
+        }
+    }
+
+    private fun isWithin(parent: View, candidate: View): Boolean {
+        var current: View? = candidate
+        while (current != null) {
+            if (current === parent) return true
+            current = current.parent as? View
+        }
+        return false
+    }
+
+    private fun refreshLocalRoomStatuses(rooms: List<LiveRoomSummary>) {
+        val mids = rooms.map { it.anchorMid }.filter { it > 0L }.distinct()
+        if (mids.isEmpty()) return
+        val token = pageGeneration
+        AppExecutors.io.execute {
+            val result = runCatching { api.getLiveRoomStatuses(mids) }
+            runOnUiThread {
+                if (token != pageGeneration || pageKey !in setOf(PAGE_FAVORITES, PAGE_RECENT) || isDestroyed) return@runOnUiThread
+                result.onSuccess { statuses ->
+                    library.updateStatuses(statuses)
+                    activeAdapter?.updateStatuses(statuses)
+                    setStatus("${activeAdapter?.itemCount ?: rooms.size} 个直播间 · 状态已更新", false)
+                }.onFailure {
+                    setStatus("${rooms.size} 个直播间 · 状态暂不可用", false)
+                }
             }
         }
     }
@@ -655,7 +893,6 @@ class LiveActivity : AppCompatActivity() {
 
     private class LiveGridAdapter(
         private val activity: LiveActivity,
-        private val library: LiveLibraryRepository,
         private val onOpen: (LiveRoomSummary) -> Unit,
     ) : RecyclerView.Adapter<LiveGridHolder>() {
         private val items = mutableListOf<LiveRoomSummary>()
@@ -669,11 +906,11 @@ class LiveActivity : AppCompatActivity() {
         )
         override fun onBindViewHolder(holder: LiveGridHolder, position: Int) {
             val card = holder.itemView as LiveRoomCard
-            card.bind(items[position], library)
+            card.bind(items[position])
             card.setOnKeyListener { _, keyCode, event ->
                 val spanCount = (activity.grid?.layoutManager as? GridLayoutManager)?.spanCount ?: 1
                 if (event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_UP && position < spanCount) {
-                    (activity.selectedAreaButton ?: activity.selectedParentButton ?: activity.categoryTab)?.requestFocus()
+                    (activity.upperContentFocus ?: activity.navButtons[activity.pageKey] ?: activity.categoryTab)?.requestFocus()
                     true
                 } else false
             }
@@ -687,6 +924,15 @@ class LiveActivity : AppCompatActivity() {
             val fresh = rooms.filter { known.add(it.roomId) }
             if (fresh.isNotEmpty()) { val start = items.size; items.addAll(fresh); notifyItemRangeInserted(start, fresh.size) }
             return fresh.size
+        }
+
+        fun updateStatuses(statuses: Map<Long, LiveRoomSummary>) {
+            items.indices.forEach { index ->
+                val saved = items[index]
+                val current = statuses[saved.anchorMid] ?: return@forEach
+                items[index] = saved.copy(liveStatus = current.liveStatus, online = current.online)
+                notifyItemChanged(index)
+            }
         }
     }
 

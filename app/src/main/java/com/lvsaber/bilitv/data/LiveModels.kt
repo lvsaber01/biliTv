@@ -39,9 +39,32 @@ data class LiveRoomSummary(
     val areaId: Int = 0,
     val areaName: String = "",
     val online: Long = 0L,
-    val liveStatus: Int = 1,
+    val liveStatus: Int = -1,
     val isPortrait: Boolean = false,
+    val anchorMid: Long = 0L,
 )
+
+/** The recommendation endpoint has no stable cursor, so repeated batches are bounded and deduplicated. */
+object LiveRecommendationPolicy {
+    const val MAX_REQUESTS_PER_VISIT = 20
+
+    fun shouldRequestNext(requestsCompleted: Int, newlyAdded: Int): Boolean =
+        newlyAdded > 0 && requestsCompleted < MAX_REQUESTS_PER_VISIT
+}
+
+enum class LiveOverlayBackAction { DISMISS_DIALOG, HIDE_CONTROLS, EXIT_PLAYER }
+
+object LiveControlsPolicy {
+    fun backAction(dialogOpen: Boolean, controlsVisible: Boolean): LiveOverlayBackAction = when {
+        dialogOpen -> LiveOverlayBackAction.DISMISS_DIALOG
+        controlsVisible -> LiveOverlayBackAction.HIDE_CONTROLS
+        else -> LiveOverlayBackAction.EXIT_PLAYER
+    }
+
+    /** Controls time out while paused too; a modal selection dialog temporarily freezes the timer. */
+    fun shouldArmHideTimeout(controlsVisible: Boolean, dialogOpen: Boolean): Boolean =
+        controlsVisible && !dialogOpen
+}
 
 data class LiveRoomDetails(
     val summary: LiveRoomSummary,
@@ -132,6 +155,20 @@ object LiveApiParser {
             }
         }
         return flattened.mapNotNull(::room).distinctBy { it.roomId }
+    }
+
+    /** Parses the public batch response keyed by anchor UID from the room status endpoint. */
+    fun roomStatuses(root: JSONObject): Map<Long, LiveRoomSummary> {
+        val data = root.optJSONObject("data") ?: return emptyMap()
+        return buildMap {
+            val keys = data.keys()
+            while (keys.hasNext()) {
+                val mid = keys.next().toLongOrNull()?.takeIf { it > 0L } ?: continue
+                val item = data.optJSONObject(mid.toString()) ?: continue
+                val summary = room(item)?.copy(anchorMid = mid) ?: continue
+                put(mid, summary)
+            }
+        }
     }
 
     fun roomDetails(initRoot: JSONObject, infoRoot: JSONObject): LiveRoomDetails {
@@ -263,8 +300,9 @@ object LiveApiParser {
             areaId = areaId,
             areaName = text("area_v2_name", "area_name", "cate_name"),
             online = long("online", "watched_show_num"),
-            liveStatus = primary.optInt("live_status", fallback.optInt("live_status", 1)),
+            liveStatus = primary.optInt("live_status", fallback.optInt("live_status", -1)),
             isPortrait = primary.optBoolean("is_portrait", fallback.optBoolean("is_portrait")),
+            anchorMid = long("uid", "mid"),
         )
     }
 

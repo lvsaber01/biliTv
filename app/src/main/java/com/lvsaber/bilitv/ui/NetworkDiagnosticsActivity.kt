@@ -18,38 +18,60 @@ class NetworkDiagnosticsActivity : AppCompatActivity() {
     private lateinit var routeHost: LinearLayout
     private lateinit var summary: TextView
     private lateinit var testButton: android.widget.Button
+    private lateinit var backButton: android.widget.Button
     private var testing = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildPage())
         render()
+        window.decorView.post { (if (testButton.isEnabled) testButton else backButton).requestFocus() }
     }
 
     private fun buildPage(): View {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Ui.background)
-            setPadding(Ui.dp(context, 20), Ui.dp(context, 14), Ui.dp(context, 20), Ui.dp(context, 18))
+            background = Ui.pageBackground(context)
+            setPadding(Ui.pageInset(context), Ui.dp(context, 14), Ui.pageInset(context), Ui.dp(context, 18))
         }
         val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        header.addView(Ui.chip(this, "‹ 返回", false) { finish() })
+        backButton = Ui.chip(this, "‹ 返回", false) { finish() }
+        header.addView(backButton)
         header.addView(Ui.text(this, "网络与播放线路", 27f), LinearLayout.LayoutParams(0, Ui.dp(this, 56), 1f))
         root.addView(header)
 
+        val wide = !Ui.isCompactWidth(this) &&
+            resources.displayMetrics.widthPixels / resources.displayMetrics.density >= 720f
         val scroll = NestedScrollView(this).apply { isFillViewport = true }
         val body = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(Ui.dp(context, 8), Ui.dp(context, 8), Ui.dp(context, 8), Ui.dp(context, 24))
+            orientation = if (wide) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+            setPadding(Ui.dp(context, 4), Ui.dp(context, 8), Ui.dp(context, 4), Ui.dp(context, 18))
         }
-        body.addView(Ui.text(this, "当前网络", 20f))
-        body.addView(Ui.text(this, RouteProbeClient.networkLabel(this), 16f, Ui.blue))
-        body.addView(Ui.text(this, "诊断只使用当前播放地址进行小范围 Range 请求，不保存完整签名 URL，也不会上传结果。", 13f, Ui.muted))
+        val overview = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val connectionCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Ui.panel(context)
+            setPadding(Ui.dp(context, 18), Ui.dp(context, 14), Ui.dp(context, 18), Ui.dp(context, 14))
+        }
+        connectionCard.addView(Ui.text(this, "当前网络", 18f).apply { setPadding(0, 0, 0, Ui.dp(context, 4)) })
+        connectionCard.addView(Ui.text(this, RouteProbeClient.networkLabel(this), 16f, Ui.blue).apply { setPadding(0, 0, 0, Ui.dp(context, 5)) })
+        connectionCard.addView(Ui.text(this, "诊断仅对当前播放地址进行小范围 Range 请求；不保存完整签名 URL，也不会上传结果。", 13f, Ui.muted).apply {
+            setPadding(0, 0, 0, 0)
+        })
+        overview.addView(connectionCard, LinearLayout.LayoutParams(-1, -2).apply {
+            bottomMargin = Ui.dp(this@NetworkDiagnosticsActivity, 10)
+        })
 
-        body.addView(Ui.text(this, "播放会话", 20f).apply { setPadding(12, Ui.dp(context, 18), 12, Ui.dp(context, 6)) })
-        summary = Ui.text(this)
-        summary.background = Ui.panel(this)
-        body.addView(summary, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = Ui.dp(this@NetworkDiagnosticsActivity, 12) })
+        summary = Ui.text(this).apply {
+            background = Ui.panel(context)
+            setPadding(Ui.dp(context, 18), Ui.dp(context, 12), Ui.dp(context, 18), Ui.dp(context, 12))
+        }
+        overview.addView(Ui.text(this, "播放会话", 18f).apply {
+            setPadding(Ui.dp(context, 4), Ui.dp(context, 5), Ui.dp(context, 4), Ui.dp(context, 5))
+        })
+        overview.addView(summary, LinearLayout.LayoutParams(-1, -2).apply {
+            bottomMargin = Ui.dp(this@NetworkDiagnosticsActivity, 12)
+        })
 
         val actions = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         testButton = Ui.button(this, "测试全部线路") { testRoutes() }
@@ -58,14 +80,25 @@ class NetworkDiagnosticsActivity : AppCompatActivity() {
             PlaybackDiagnosticsStore.clearProbes()
             render()
         }, LinearLayout.LayoutParams(-2, Ui.dp(this, 42)).apply { marginStart = Ui.dp(this@NetworkDiagnosticsActivity, 10) })
-        body.addView(actions)
+        overview.addView(actions)
 
-        body.addView(Ui.text(this, "线路结果", 20f).apply { setPadding(12, Ui.dp(context, 18), 12, Ui.dp(context, 6)) })
-        routeHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        body.addView(routeHost)
-        body.addView(Ui.text(this, "提示：测速结果只代表当前网络、当前签名地址和当前时间；真正播放时仍以 Media3 的首帧、缓冲和错误结果为准。", 13f, Ui.muted).apply {
-            setPadding(12, Ui.dp(context, 14), 12, 0)
+        val results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        results.addView(Ui.text(this, "线路结果", 18f).apply {
+            setPadding(Ui.dp(context, 4), 0, Ui.dp(context, 4), Ui.dp(context, 5))
         })
+        routeHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        results.addView(routeHost)
+        results.addView(Ui.text(this, "测速仅代表当前网络、当前签名地址和当前时间；实际播放仍以首帧、缓冲和解码结果为准。", 13f, Ui.muted).apply {
+            setPadding(Ui.dp(context, 4), Ui.dp(context, 10), Ui.dp(context, 4), 0)
+        })
+
+        if (wide) {
+            body.addView(overview, LinearLayout.LayoutParams(0, -1, 4f).apply { marginEnd = Ui.dp(this@NetworkDiagnosticsActivity, 14) })
+            body.addView(results, LinearLayout.LayoutParams(0, -1, 6f))
+        } else {
+            body.addView(overview, LinearLayout.LayoutParams(-1, -2))
+            body.addView(results, LinearLayout.LayoutParams(-1, -2).apply { topMargin = Ui.dp(this@NetworkDiagnosticsActivity, 14) })
+        }
         scroll.addView(body)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         return root
@@ -84,9 +117,21 @@ class NetworkDiagnosticsActivity : AppCompatActivity() {
         val routes = PlaybackDiagnosticsStore.routeSet().routes
         routeHost.removeAllViews()
         if (routes.isEmpty()) {
-            routeHost.addView(Ui.text(this, "当前没有活动播放线路。请从播放器打开诊断，或先开始播放视频。", 15f, Ui.muted).apply {
+            val empty = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                minimumHeight = Ui.dp(context, 220)
                 background = Ui.panel(context)
+                setPadding(Ui.dp(context, 22), Ui.dp(context, 20), Ui.dp(context, 22), Ui.dp(context, 20))
+            }
+            empty.addView(Ui.text(this, "开始播放后可测试线路", 18f, Ui.text).apply {
+                gravity = Gravity.CENTER
             })
+            empty.addView(Ui.text(this, "当前没有活动播放线路。可先播放一个视频，再从播放器打开诊断。", 14f, Ui.muted).apply {
+                gravity = Gravity.CENTER
+                setPadding(0, Ui.dp(context, 5), 0, 0)
+            })
+            routeHost.addView(empty, LinearLayout.LayoutParams(-1, -2))
         } else {
             val probes = PlaybackDiagnosticsStore.probes()
             routes.forEach { route -> routeHost.addView(routeView(route, probes[route.id])) }

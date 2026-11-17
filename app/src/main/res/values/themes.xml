@@ -7,6 +7,25 @@
         <item name="android:colorAccent">@color/bili_brand_blue</item>
         <item name="android:windowActionModeOverlay">true</item>
         <item name="android:windowNoTitle">true</item>
+        <item name="alertDialogTheme">@style/ThemeOverlay.BiliTv.AlertDialog</item>
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.BiliTv.AlertDialog</item>
+    </style>
+
+    <style name="ThemeOverlay.BiliTv.AlertDialog" parent="ThemeOverlay.MaterialComponents.MaterialAlertDialog">
+        <item name="colorSurface">@color/blbl_dialog_surface</item>
+        <item name="colorOnSurface">@color/blbl_text</item>
+        <item name="android:windowBackground">@drawable/bg_dialog_surface</item>
+        <item name="android:listSelector">@drawable/bg_dialog_list_selector</item>
+        <item name="android:listChoiceBackgroundIndicator">@drawable/bg_dialog_list_selector</item>
+        <item name="android:textColorAlertDialogListItem">@color/blbl_text</item>
+        <item name="android:textColorPrimary">@color/blbl_text</item>
+        <item name="android:textColorSecondary">@color/blbl_muted</item>
+        <item name="android:colorAccent">@color/bili_brand_blue</item>
+        <item name="materialAlertDialogBodyTextStyle">@style/ThemeOverlay.BiliTv.AlertDialogBody</item>
+    </style>
+
+    <style name="ThemeOverlay.BiliTv.AlertDialogBody" parent="TextAppearance.MaterialComponents.Body2">
+        <item name="android:textColor">@color/blbl_text</item>
     </style>
 </resources>
 

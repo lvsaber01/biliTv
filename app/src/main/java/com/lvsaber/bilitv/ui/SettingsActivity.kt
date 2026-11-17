@@ -24,7 +24,9 @@ class SettingsActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         settings = AppSettings.load(this)
-        setContentView(buildPage())
+        val page = buildPage()
+        setContentView(page)
+        page.post { categoryButtons[selectedSheet]?.requestFocus() }
     }
 
     private val sheetCache = mutableMapOf<String, Pair<NestedScrollView, LinearLayout>>()
@@ -93,8 +95,8 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun buildPage(): View {
         val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setBackgroundColor(Ui.background)
-            setPadding(Ui.dp(context, 20), Ui.dp(context, 14), Ui.dp(context, 20), Ui.dp(context, 18))
+            orientation = LinearLayout.VERTICAL; background = Ui.pageBackground(context)
+            setPadding(Ui.pageInset(context), Ui.dp(context, 14), Ui.pageInset(context), Ui.dp(context, 18))
         }
         val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         header.addView(Ui.chip(this, "‹ 返回", false) { finish() })
@@ -144,7 +146,7 @@ class SettingsActivity : AppCompatActivity() {
             columns.addView(NestedScrollView(this).apply { addView(nav) }, LinearLayout.LayoutParams(Ui.dp(this, 155), -1))
         }
         sheetHost = android.widget.FrameLayout(this).apply {
-            background = Ui.roundedBackground(Ui.surface, Ui.dp(context, 18))
+            background = Ui.floatingPanel(context)
         }
         columns.addView(sheetHost, if (compact) {
             LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = Ui.dp(this@SettingsActivity, 8) }
@@ -232,10 +234,10 @@ class SettingsActivity : AppCompatActivity() {
                         settings = settings.copy(routePolicy = it); saveAndRefresh()
                     }
                     content.addView(Ui.text(this, "自动切换只处理连接、超时和 HTTP 线路错误；解码器、HDR 和会员权限错误不会误切 CDN。测速仅在你主动触发时执行。", 13f, Ui.muted))
-                    content.addView(Ui.button(this, "打开网络诊断") {
+                    content.addView(Ui.secondaryButton(this, "打开网络诊断") {
                         startActivity(android.content.Intent(this, NetworkDiagnosticsActivity::class.java))
                     })
-                    content.addView(Ui.button(this, "清除线路诊断结果") {
+                    content.addView(Ui.secondaryButton(this, "清除线路诊断结果") {
                         com.lvsaber.bilitv.data.PlaybackDiagnosticsStore.clearProbes()
                         android.widget.Toast.makeText(this, "线路诊断结果已清除", android.widget.Toast.LENGTH_SHORT).show()
                     })
@@ -296,15 +298,15 @@ class SettingsActivity : AppCompatActivity() {
                 }
                 "account" -> {
                     content.addView(Ui.text(this, "账号进度独立保存，退出登录后使用访客记录。清理封面缓存保留观看进度和设置。", 14f, Ui.muted))
-                    content.addView(Ui.button(this, "二维码登录") { startActivity(android.content.Intent(this, LoginActivity::class.java)) })
-                    content.addView(Ui.button(this, "退出登录") {
+                    content.addView(Ui.secondaryButton(this, "二维码登录") { startActivity(android.content.Intent(this, LoginActivity::class.java)) })
+                    content.addView(Ui.secondaryButton(this, "退出登录") {
                         confirm("退出当前账号？") {
                             com.lvsaber.bilitv.data.BiliApiClient(this).clearSession()
                             com.lvsaber.bilitv.data.ProgressRepository.get(this).refreshAccount()
                             android.widget.Toast.makeText(this, "已退出登录", android.widget.Toast.LENGTH_SHORT).show()
                         }
                     })
-                    content.addView(Ui.button(this, "清理封面缓存") {
+                    content.addView(Ui.secondaryButton(this, "清理封面缓存") {
                         confirm("清理已缓存的封面图片？") {
                             android.widget.Toast.makeText(this, "正在清理封面缓存…", android.widget.Toast.LENGTH_SHORT).show()
                             CoverLoader.clear(this) { success ->
@@ -345,7 +347,7 @@ class SettingsActivity : AppCompatActivity() {
             targetTag?.let { tag -> scroll.post { content.findViewWithTag<View>(tag)?.let { scroll.scrollTo(0, it.top) } } }
         }
         categoryButtons.forEach { (category, button) ->
-            button.background = Ui.roundedBackground(if (category == key) Ui.blue else Ui.surfaceRaised, Ui.dp(this, 12))
+            Ui.setChipSelected(button, category == key)
         }
     }
 

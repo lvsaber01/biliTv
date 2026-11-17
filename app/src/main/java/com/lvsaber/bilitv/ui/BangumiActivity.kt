@@ -85,6 +85,8 @@ class BangumiActivity : AppCompatActivity() {
     private var indexFilterButton: Button? = null
     private var indexFilterSummary: TextView? = null
     private var pendingSearch = ""
+    private lateinit var zoneButton: Button
+    private var zoneSwitchView: LinearLayout? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -153,8 +155,8 @@ class BangumiActivity : AppCompatActivity() {
     private fun buildRoot(): View {
         val compact = Ui.isCompactWidth(this)
         val root = FrameLayout(this).apply {
-            setBackgroundColor(Ui.background)
-            val horizontalPadding = Ui.dp(context, if (compact) 8 else 20)
+            background = Ui.pageBackground(context)
+            val horizontalPadding = if (compact) Ui.dp(context, 8) else Ui.pageInset(context)
             setPadding(horizontalPadding, 0, horizontalPadding, 0)
         }
         content = FrameLayout(this)
@@ -164,7 +166,7 @@ class BangumiActivity : AppCompatActivity() {
         val toolbar = LinearLayout(this).apply {
             orientation = if (compact) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = Ui.roundedBackground(0xED151A21.toInt(), Ui.dp(context, 18))
+            background = Ui.floatingPanel(context)
             elevation = Ui.dp(context, 12).toFloat()
             val horizontalPadding = Ui.dp(context, if (compact) 6 else 10)
             setPadding(horizontalPadding, 0, horizontalPadding, 0)
@@ -174,7 +176,7 @@ class BangumiActivity : AppCompatActivity() {
             contentDescription = getString(R.string.app_name)
             scaleType = ImageView.ScaleType.FIT_CENTER
         }
-        val zoneButton = navButton("专区：番剧 ▾") { showZoneChooser() }
+        zoneButton = navButton("专区：番剧 ▾") { showZoneChooser() }
         navStrip = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         navScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
@@ -206,7 +208,13 @@ class BangumiActivity : AppCompatActivity() {
             root.addView(toolbar, FrameLayout.LayoutParams(-1, Ui.dp(this, 100)).apply { topMargin = Ui.dp(this@BangumiActivity, 14) })
         } else {
             toolbar.addView(logo, LinearLayout.LayoutParams(Ui.dp(this, 96), Ui.dp(this, 58)))
-            toolbar.addView(zoneButton)
+            zoneSwitchView = Ui.zoneSwitch(this, "bangumi", ::openZone).apply {
+                layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(this@BangumiActivity, 48)).apply {
+                    marginStart = Ui.dp(this@BangumiActivity, 6)
+                    marginEnd = Ui.dp(this@BangumiActivity, 6)
+                }
+            }
+            toolbar.addView(zoneSwitchView)
             toolbar.addView(navScroll, LinearLayout.LayoutParams(0, Ui.dp(this, 58), 1f))
             fixedInOrder.forEach { toolbar.addView(it) }
             root.addView(toolbar, FrameLayout.LayoutParams(-1, Ui.dp(this, 62)).apply { topMargin = Ui.dp(this@BangumiActivity, 14) })
@@ -245,6 +253,7 @@ class BangumiActivity : AppCompatActivity() {
     }
 
     private fun updateNavigation() {
+        zoneSwitchView?.let { Ui.setZoneSwitchSelection(it, "bangumi") }
         navButtons.forEach { (key, button) ->
             val selected = key == currentPage
             button.setTextColor(if (selected) android.graphics.Color.WHITE else Ui.muted)
@@ -252,6 +261,14 @@ class BangumiActivity : AppCompatActivity() {
         }
         fixedButtons.forEach { (key, button) ->
             button.background = Ui.roundedBackground(if (currentPage == key) 0x27FFFFFF else android.graphics.Color.TRANSPARENT, Ui.dp(this, 12))
+        }
+    }
+
+    private fun openZone(zone: String) {
+        when (zone) {
+            "video" -> startActivity(Intent(this, MainActivity::class.java))
+            "bangumi" -> showPage("recommend")
+            "live" -> startActivity(Intent(this, LiveActivity::class.java))
         }
     }
 
@@ -431,7 +448,9 @@ class BangumiActivity : AppCompatActivity() {
             layoutManager = LinearLayoutManager(this@BangumiActivity, RecyclerView.HORIZONTAL, false)
             itemAnimator = null
         }
-        val adapter = PgcSeasonAdapter({ openDetail(it.seasonId) }, itemWidthDp = if (Ui.isCompactWidth(this)) 132 else 174)
+        val pageWidthPx = (resources.displayMetrics.widthPixels - 2 * Ui.pageInset(this)).coerceAtLeast(Ui.dp(this, 300))
+        val itemWidthDp = (Ui.railCardWidth(this, pageWidthPx) / resources.displayMetrics.density).toInt().coerceAtLeast(132)
+        val adapter = PgcSeasonAdapter({ openDetail(it.seasonId) }, itemWidthDp = itemWidthDp)
         rv.adapter = adapter
         row.addView(status); row.addView(rv, LinearLayout.LayoutParams(-1, -2))
         body.addView(row)
@@ -924,26 +943,48 @@ class BangumiActivity : AppCompatActivity() {
     }
 
     private fun showSearch() {
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, Ui.dp(context, 2), 0, 0) }
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(Ui.dp(context, 4), Ui.dp(context, 6), Ui.dp(context, 4), Ui.dp(context, 8))
+        }
         val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        header.addView(Ui.text(this, "搜索番剧", 18f, Ui.text), LinearLayout.LayoutParams(0, Ui.dp(this, 34), 1f))
+        header.addView(Ui.text(this, "搜索番剧", 24f, Ui.text).apply { setPadding(Ui.dp(context, 4), 0, 0, 0) },
+            LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1f))
         header.addView(Ui.chip(this, "返回", false) { showPage(searchReturnPage) })
-        root.addView(header)
+        root.addView(header, LinearLayout.LayoutParams(-1, Ui.dp(this, 44)).apply {
+            bottomMargin = Ui.dp(this@BangumiActivity, 8)
+        })
         val filter = categoryFilters { resetSearch(pendingSearch) }
-        root.addView(filter)
-        val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        val input = EditText(this).apply {
+        root.addView(filter, LinearLayout.LayoutParams(-1, Ui.dp(this, if (Ui.isTelevision(this)) 40 else 48)).apply {
+            bottomMargin = Ui.dp(this@BangumiActivity, 8)
+        })
+        val input = Ui.searchInput(this, "输入番剧名称").apply {
             tag = "bangumi-search-input"
-            hint = "输入番剧名称"
-            setSingleLine(true); setTextColor(Ui.text); setHintTextColor(Ui.muted); background = Ui.panel(context)
             setText(pendingSearch)
         }
-        row.addView(input, LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1f))
-        row.addView(Ui.button(this, "搜索") { pendingSearch = input.text.toString().trim(); resetSearch(pendingSearch) })
+        val submit = Ui.button(this, "搜索") { pendingSearch = input.text.toString().trim(); resetSearch(pendingSearch) }
+            .apply { tag = "bangumi-search-submit" }
+        Ui.linkSearchFocus(input, submit)
+        val filterButtons = (filter.getChildAt(0) as? android.view.ViewGroup)?.let { row ->
+            (0 until row.childCount).mapNotNull { row.getChildAt(it) as? Button }
+        }.orEmpty()
+        filterButtons.forEach {
+            if (it.id == View.NO_ID) it.id = View.generateViewId()
+            it.nextFocusDownId = input.id
+        }
+        input.nextFocusUpId = filterButtons.firstOrNull { it.isSelected }?.id ?: filterButtons.firstOrNull()?.id ?: View.NO_ID
+        val row = Ui.searchBox(this, input, submit)
+        root.addView(row, LinearLayout.LayoutParams(-1, if (Ui.isTelevision(this)) Ui.dp(this, 58) else Ui.dp(this, 64)).apply {
+            bottomMargin = Ui.dp(this@BangumiActivity, 6)
+        })
         input.setOnEditorActionListener { _, _, _ -> pendingSearch = input.text.toString().trim(); resetSearch(pendingSearch); true }
-        root.addView(row)
         val status = Ui.text(this, "搜索只返回日本动画与国创动画；无法验证分类的结果会被过滤。", 14f, Ui.muted)
-        currentStatus = status; root.addView(status)
+        status.tag = "bangumi-search-status"
+        currentStatus = status
+        root.addView(status, LinearLayout.LayoutParams(-1, Ui.dp(this, 40)).apply {
+            topMargin = Ui.dp(this@BangumiActivity, 4)
+            bottomMargin = Ui.dp(this@BangumiActivity, 2)
+        })
         val grid = seasonGrid { openDetail(it.seasonId) }
         root.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
         val more = Ui.chip(this, "加载更多", false) { searchPgc(pendingSearch, reset = false) }.apply { visibility = View.GONE }

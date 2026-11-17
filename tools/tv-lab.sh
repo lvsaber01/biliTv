@@ -5,18 +5,28 @@ umask 077
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SDK_ROOT="${BILITV_SDK_ROOT:-$PROJECT_ROOT/.toolcache/android}"
+GRADLE_BIN="${BILITV_GRADLE_BIN:-$PROJECT_ROOT/.toolcache/gradle/gradle-8.10.2/bin/gradle}"
 LAB_ROOT="$PROJECT_ROOT/.toolcache/tv-lab"
 AVD_NAME="biliTv_TV_API31_ARM64"
 IMAGE="system-images;android-31;android-tv;arm64-v8a"
 PORT=5580
 SERIAL="emulator-$PORT"
-APP="com.lvsaber.bilitv"
+TV_WIDTH=3840
+TV_HEIGHT=2160
+TV_DENSITY=320
+TV_LOGICAL_WIDTH=1920
+TV_LOGICAL_HEIGHT=1080
+TV_LOGICAL_DENSITY=160
+APP="com.lvsaber.bilitv.debug"
 ADB="$SDK_ROOT/platform-tools/adb"
 export ANDROID_HOME="$SDK_ROOT"
 export ANDROID_SDK_ROOT="$SDK_ROOT"
 export ANDROID_AVD_HOME="$LAB_ROOT/avd"
 if [[ -z "${JAVA_HOME:-}" && -d /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home ]]; then
     export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+fi
+if [[ -z "${JAVA_HOME:-}" && -x "$PROJECT_ROOT/.toolcache/jdk/Contents/Home/bin/java" ]]; then
+    export JAVA_HOME="$PROJECT_ROOT/.toolcache/jdk/Contents/Home"
 fi
 mkdir -p "$ANDROID_AVD_HOME" "$LAB_ROOT/captures"
 chmod 700 "$LAB_ROOT"
@@ -42,6 +52,10 @@ wait_ready() {
         sleep 1
     done
     require_device
+    # Android TV's 4K panel reports a 1080p logical mode. Model the 4K dp canvas
+    # explicitly: 1920x1080 logical pixels at 160dpi, scaled to a 3840x2160 panel.
+    device shell wm size "${TV_LOGICAL_WIDTH}x${TV_LOGICAL_HEIGHT}" >/dev/null
+    device shell wm density "$TV_LOGICAL_DENSITY" >/dev/null
 }
 
 case "${1:-help}" in
@@ -57,10 +71,11 @@ case "${1:-help}" in
         if [[ ! -f "$ANDROID_AVD_HOME/$AVD_NAME.ini" ]]; then
             "$SDK_ROOT/cmdline-tools/latest/bin/avdmanager" create avd --name "$AVD_NAME" \
                 --package "$IMAGE" --device tv_1080p --path "$ANDROID_AVD_HOME/$AVD_NAME.avd"
-            # Mechanical normalization of the SDK-generated profile, not app source.
-            perl -pi -e 's/^hw.initialOrientation=.*/hw.initialOrientation=landscape/; s/^hw.keyboard=.*/hw.keyboard=yes/; s/^hw.screen=.*/hw.screen=no-touch/' \
-                "$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
         fi
+        # Use a 4K pixel canvas at a TV-like density. This yields 1920x1080dp,
+        # unlike the SDK's 1080p profile at 320dpi (960x540dp).
+        perl -pi -e "s/^hw.initialOrientation\\s*=.*/hw.initialOrientation = landscape/; s/^hw.keyboard\\s*=.*/hw.keyboard = yes/; s/^hw.screen\\s*=.*/hw.screen = no-touch/; s/^hw.lcd.width\\s*=.*/hw.lcd.width = ${TV_WIDTH}/; s/^hw.lcd.height\\s*=.*/hw.lcd.height = ${TV_HEIGHT}/; s/^hw.lcd.density\\s*=.*/hw.lcd.density = ${TV_DENSITY}/" \
+            "$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini"
         "$SDK_ROOT/emulator/emulator" -accel-check
         ;;
     start)
@@ -76,13 +91,16 @@ case "${1:-help}" in
         esac
         # Foreground by design: Ctrl-C closes this lab, never another device.
         exec "$SDK_ROOT/emulator/emulator" -avd "$AVD_NAME" -port "$PORT" \
-            -memory 2048 -cores 2 -gpu auto -feature -Vulkan \
+            -memory 2048 -cores 2 -dpi-device "$TV_DENSITY" -gpu auto -feature -Vulkan \
             -no-metrics -crash-report-mode disabled "${extra[@]}"
         ;;
     wait) wait_ready ;;
     build)
         cd "$PROJECT_ROOT"
-        ./gradlew :app:assembleDebug --offline
+        [[ -x "${JAVA_HOME:-}/bin/java" ]] || die "Java runtime missing; set JAVA_HOME or install the project's local JDK."
+        [[ -x "$GRADLE_BIN" ]] || die "Local Gradle missing: $GRADLE_BIN"
+        export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$PROJECT_ROOT/.toolcache/gradle-user}"
+        "$GRADLE_BIN" --no-daemon --offline :app:assembleDebug
         ;;
     launch)
         bash "$PROJECT_ROOT/tools/tv-lab.sh" build
@@ -109,7 +127,10 @@ case "${1:-help}" in
     run)
         require_device; wait_ready
         device shell pm path "$APP" | /usr/bin/grep -q '^package:' || die "biliTv is not installed. Run bash tools/tv-lab.sh install."
-        device shell am start -W -n "$APP/.ui.MainActivity"
+        device shell am force-stop "$APP"
+        device shell am start -W -n "$APP/com.lvsaber.bilitv.ui.MainActivity"
+        activity="$(device shell dumpsys activity activities | /usr/bin/grep -E 'mResumedActivity|topResumedActivity' || true)"
+        [[ "$activity" == *"com.lvsaber.bilitv.ui.MainActivity"* ]] || die "MainActivity did not open: $activity"
         ;;
     key)
         require_device

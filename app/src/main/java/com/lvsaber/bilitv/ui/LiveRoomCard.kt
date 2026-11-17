@@ -8,8 +8,8 @@ import com.lvsaber.bilitv.data.LiveRoomSummary
 
 class LiveRoomCard(context: Context) : LinearLayout(context) {
     private val poster = Ui.poster(context)
-    private val title = Ui.text(context, size = 13f)
-    private val details = Ui.text(context, size = 10f, color = Ui.muted)
+    private val title = Ui.text(context, size = 15f)
+    private val details = Ui.text(context, size = 11.5f, color = Ui.muted)
     private val liveLabel = Ui.text(context, "", 10f, android.graphics.Color.WHITE).apply {
         gravity = Gravity.CENTER
         background = Ui.roundedBackground(Ui.pink, Ui.dp(context, 8))
@@ -20,6 +20,7 @@ class LiveRoomCard(context: Context) : LinearLayout(context) {
     init {
         orientation = VERTICAL
         background = Ui.panel(context)
+        clipToOutline = true
         isClickable = true
         isFocusable = true
         setPadding(Ui.dp(context, 6), Ui.dp(context, 2), Ui.dp(context, 6), Ui.dp(context, 2))
@@ -53,7 +54,7 @@ class LiveRoomCard(context: Context) : LinearLayout(context) {
             if (item.online > 0L) add("${formatCount(item.online)} 人气")
         }.joinToString(" · ")
         val badge = when (item.liveStatus) {
-            1 -> "直播中" to Ui.pink
+            1 -> "LIVE" to Ui.pink
             2 -> "轮播中" to Ui.blue
             0 -> "已下播" to 0xFF59616B.toInt()
             else -> "状态未知" to 0xFF59616B.toInt()

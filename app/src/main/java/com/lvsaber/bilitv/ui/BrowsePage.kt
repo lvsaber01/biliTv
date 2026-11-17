@@ -227,6 +227,7 @@ class BrowsePage(
     private var verticalPosition = 0
     private var lastFocusedRail: Rail? = null
     private val grid = channel == null && settings.homeStyle == AppSettings.HomeStyle.GRID
+    private val showHero = channel == null && settings.heroEnabled && !grid
     private val cardWidth get() = Ui.railCardWidth(context, width.takeIf { it > 0 }
         ?: (resources.displayMetrics.widthPixels - Ui.dp(context, 40)))
 
@@ -235,7 +236,7 @@ class BrowsePage(
         if (w != oldw && w > 0 && !grid) post {
             rails.forEach { rail ->
                 rail.list.layoutParams = (rail.list.layoutParams as LayoutParams).apply {
-                    height = Ui.cardHeight(context, cardWidth) + Ui.dp(context, 12)
+                    height = Ui.cardHeight(context, cardWidth) + Ui.dp(context, 8)
                 }
                 rail.adapter.notifyDataSetChanged()
             }
@@ -246,7 +247,7 @@ class BrowsePage(
         orientation = VERTICAL
         val definitions = if (grid) listOf(BrowseRail("featured", "热门精选", BrowseSource.POPULAR))
             else channel?.let { ChannelCatalog.rails(it, settings) } ?: ChannelCatalog.homeRails(settings)
-        if (channel == null && settings.heroEnabled && !grid && definitions.isNotEmpty()) {
+        if (showHero && definitions.isNotEmpty()) {
             heroHost.addView(Ui.text(context, "正在准备本期推荐…", 20f))
             body.addView(heroHost, LayoutParams(-1, Ui.dp(context, 40)).apply { bottomMargin = Ui.dp(context, 4) })
         }
@@ -331,7 +332,7 @@ class BrowsePage(
             itemAnimator = null
             isNestedScrollingEnabled = !grid
             clipToPadding = false
-            setPadding(Ui.dp(context, 5), Ui.dp(context, 4), Ui.dp(context, 8), Ui.dp(context, 4))
+            setPadding(Ui.dp(context, 5), Ui.dp(context, 2), Ui.dp(context, 8), Ui.dp(context, 2))
             descendantFocusability = FOCUS_AFTER_DESCENDANTS
             isFocusable = false
             setItemViewCacheSize(2)
@@ -361,7 +362,7 @@ class BrowsePage(
                 }
             })
         }
-        body.addView(rail.list, LayoutParams(-1, if (grid) Ui.dp(context, 620) else Ui.cardHeight(context, cardWidth) + Ui.dp(context, 12)).apply { bottomMargin = Ui.dp(context, 4) })
+        body.addView(rail.list, LayoutParams(-1, if (grid) Ui.dp(context, 620) else Ui.cardHeight(context, cardWidth) + Ui.dp(context, 8)).apply { bottomMargin = Ui.dp(context, 2) })
         // Empty and failed rails still have a D-pad landing point.
         rail.status.isFocusable = true
         Ui.focusHighlight(rail.status)
@@ -406,7 +407,7 @@ class BrowsePage(
                     smoothToAppendedCard = focusNew && oldSize > 0,
                 )
             }
-            if (channel == null && settings.heroEnabled && !grid && oldSize == 0 && rail === rails.firstOrNull()) addHero(newItems.first())
+            if (showHero && oldSize == 0 && rail === rails.firstOrNull()) addHero(newItems.first())
         }
         status(rail)
     }
@@ -499,7 +500,7 @@ class BrowsePage(
                         rail.focusWhenReady = active && !rail.focusAfterRefresh &&
                             (focusRail === rail || lastFocusedRail === rail)
                         rail.prefetchAt = -1
-                        if (channel == null && settings.heroEnabled && !grid && rail === rails.firstOrNull() && refreshed.isNotEmpty()) {
+                        if (showHero && rail === rails.firstOrNull() && refreshed.isNotEmpty()) {
                             addHero(refreshed.first())
                         }
                     } else {

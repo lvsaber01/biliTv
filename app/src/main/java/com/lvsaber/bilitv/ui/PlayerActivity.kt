@@ -56,6 +56,7 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var danmakuOverlay: DanmakuOverlay
     private lateinit var subtitleOverlay: SubtitleOverlay
     private lateinit var danmakuButton: android.widget.Button
+    private lateinit var quickQualityButton: android.widget.Button
     private var danmakuState = "加载中"
     private var danmakuLoading = false
     private lateinit var api: BiliApiClient
@@ -158,6 +159,7 @@ class PlayerActivity : AppCompatActivity() {
             override fun handleOnBackPressed() {
                 if (pgcPicker != null) closePgcPicker(restorePlayback = true)
                 else if (errorView?.visibility == View.VISIBLE) finish()
+                else if (controls.morePanelVisible) controls.closeOptionsPanel()
                 else if (controls.controlsVisible) controls.hideControls() else finish()
             }
         })
@@ -197,20 +199,15 @@ class PlayerActivity : AppCompatActivity() {
         actionRail = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
-            setPadding(Ui.dp(context, 12), Ui.dp(context, 4), Ui.dp(context, 12), Ui.dp(context, 4))
-            setBackgroundColor(0x990B0E12.toInt())
+            clipChildren = false
         }
-        actionRail.addView(actionButton("画质") { showQualityChooser() })
-        pgcEpisodeButton = actionButton("选集") { showPgcEpisodePicker() }.also { it.visibility = if (currentPgc == null) View.GONE else View.VISIBLE }
+        pgcEpisodeButton = actionButton("选集") { showPgcEpisodePicker() }.also {
+            it.tag = "playback-episodes"
+            it.visibility = if (currentPgc == null) View.GONE else View.VISIBLE
+        }
         actionRail.addView(pgcEpisodeButton)
-        actionRail.addView(actionButton("音轨") { showAudioChooser() })
-        actionRail.addView(actionButton("倍速") { showSpeedChooser() })
-        actionRail.addView(actionButton("字幕") { showSubtitleChooser() })
-        val chapterAction = actionButton("章节") { showChapterChooser() }.apply { visibility = View.GONE }
-        chapterButton = chapterAction
-        actionRail.addView(chapterAction)
-        actionRail.addView(actionButton("画面") { showResizeChooser() })
-        actionRail.addView(actionButton("线路") { showLineInfo() })
+        quickQualityButton = actionButton("画质") { showQualityChooser() }.apply { tag = "playback-quality" }
+        actionRail.addView(quickQualityButton)
         danmakuButton = actionButton("弹幕 · 加载中") {
             if (danmakuState == "失败" && danmakuOverlay.overlayEnabled) {
                 loadDanmaku(currentCid)
@@ -220,14 +217,45 @@ class PlayerActivity : AppCompatActivity() {
             AppSettings.load(this).copy(danmakuEnabled = danmakuOverlay.overlayEnabled).save(this)
             updateDanmakuButton()
             Toast.makeText(this, if (danmakuOverlay.overlayEnabled) "弹幕已开启" else "弹幕已关闭", Toast.LENGTH_SHORT).show()
-        }
+        }.apply { tag = "playback-danmaku" }
         actionRail.addView(danmakuButton)
-        actionRail.addView(actionButton("弹幕设置") {
+
+        val moreActions = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            tag = "playback-more-actions"
+        }
+        fun addMoreAction(label: String, action: () -> Unit, tag: String? = null): android.widget.Button {
+            val button = actionButton(label, action).apply {
+                this.tag = tag
+                setTextColor(Ui.text)
+                background = Ui.roundedBackground(Ui.surfaceRaised, Ui.dp(this@PlayerActivity, 10))
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(Ui.dp(context, 15), 0, Ui.dp(context, 12), 0)
+                id = View.generateViewId()
+            }
+            moreActions.addView(button, LinearLayout.LayoutParams(-1, Ui.dp(this, 44)).apply {
+                bottomMargin = Ui.dp(this@PlayerActivity, 7)
+            })
+            return button
+        }
+        addMoreAction("播放速度", { showSpeedChooser() }, "playback-speed")
+        addMoreAction("音轨", { showAudioChooser() }, "playback-audio")
+        addMoreAction("字幕", { showSubtitleChooser() }, "playback-subtitle")
+        chapterButton = addMoreAction("章节", { showChapterChooser() }, "playback-chapters").apply { visibility = View.GONE }
+        addMoreAction("画面比例", { showResizeChooser() }, "playback-resize")
+        addMoreAction("弹幕详细设置", {
             startActivity(android.content.Intent(this, SettingsActivity::class.java).putExtra("section", "danmaku"))
-        })
-        actionRail.addView(actionButton("设置") {
+        }, "playback-danmaku-settings")
+        addMoreAction("播放线路", { showLineInfo() }, "playback-routes")
+        addMoreAction("网络诊断", { startActivity(android.content.Intent(this, NetworkDiagnosticsActivity::class.java)) }, "playback-network")
+        addMoreAction("应用设置", {
             startActivity(android.content.Intent(this, SettingsActivity::class.java).putExtra("section", "playback"))
-        })
+        }, "playback-settings")
+        val moreButton = actionButton("更多") { controls.toggleOptionsPanel() }.apply {
+            tag = "playback-more-toggle"
+            contentDescription = "更多播放设置"
+        }
+        actionRail.addView(moreButton)
         controls = PlaybackControls(this, title, actionRail,
             togglePlayback = {
                 player?.let { exo ->
@@ -237,7 +265,8 @@ class PlayerActivity : AppCompatActivity() {
                 updatePlaybackUi()
             },
             seekPlayback = { target -> player?.seekTo(target); updatePlaybackUi() },
-            focusVideo = { root.requestFocus() })
+            focusVideo = { root.requestFocus() },
+            moreActions = moreActions)
         root.addView(controls, FrameLayout.LayoutParams(-1, -1))
         root.post { if (errorView?.visibility != View.VISIBLE && !isDestroyed) controls.showControls() }
         return root
@@ -422,6 +451,12 @@ class PlayerActivity : AppCompatActivity() {
             source.routeSet
         } ?: PlaybackRouteSet()
         val effectiveSource = source.copy(routeSet = activeRoutes)
+        if (::controls.isInitialized) {
+            val quality = source.videoTrack?.height?.takeIf { it > 0 }?.let { "${it}P" } ?: source.quality
+            val codec = source.videoTrack?.codecs?.let(::playerCodecLabel).orEmpty()
+            controls.updateStreamLabel(listOf(quality, codec).filter(String::isNotBlank).joinToString(" · ").ifBlank { "播放中" })
+            if (::quickQualityButton.isInitialized) quickQualityButton.text = "画质 · ${quality.ifBlank { "自动" }}"
+        }
         effectiveSource.routeSet.selectedRoute?.id?.let { routeRecoveryAttempted += it }
         val routeState = AtomicReference(activeRoutes)
         PlaybackDiagnosticsStore.setRouteSet(activeRoutes)
@@ -866,6 +901,17 @@ class PlayerActivity : AppCompatActivity() {
         danmakuButton.background = Ui.roundedBackground(if (enabled) Ui.blue else Ui.surfaceRaised, Ui.dp(this, 8))
         danmakuButton.setTextColor(if (enabled) Ui.text else Ui.muted)
         danmakuButton.isSelected = enabled
+    }
+
+    private fun playerCodecLabel(value: String): String {
+        val codec = value.substringBefore('.').lowercase()
+        return when {
+            codec.startsWith("avc") -> "H.264"
+            codec.startsWith("hev") || codec.startsWith("hvc") -> "H.265"
+            codec.startsWith("av01") -> "AV1"
+            codec.isBlank() -> ""
+            else -> codec.uppercase()
+        }
     }
 
     private fun applyDanmakuSettings() {

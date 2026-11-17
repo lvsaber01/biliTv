@@ -80,34 +80,34 @@ class UpProfileActivity : AppCompatActivity() {
     private fun buildPage(): View {
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Ui.background)
-            setPadding(Ui.dp(context, 20), Ui.dp(context, 14), Ui.dp(context, 20), Ui.dp(context, 12))
+            background = Ui.pageBackground(context)
+            setPadding(Ui.pageInset(context), Ui.dp(context, 10), Ui.pageInset(context), Ui.dp(context, 8))
         }
         val top = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         backButton = Ui.chip(this, "‹ 返回", false) { finish() }
         top.addView(backButton, LinearLayout.LayoutParams(-2, Ui.dp(this, 42)))
-        top.addView(Ui.text(this, "UP 主空间", 23f).apply { setPadding(Ui.dp(context, 16), 0, 0, 0) }, LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1f))
+        top.addView(Ui.text(this, "UP 主空间", 22f).apply { setPadding(Ui.dp(context, 14), 0, 0, 0) }, LinearLayout.LayoutParams(0, Ui.dp(this, 46), 1f))
         val refresh = Ui.chip(this, "刷新", false) { loadProfile() }
-        top.addView(refresh, LinearLayout.LayoutParams(-2, Ui.dp(this, 42)))
-        root.addView(top, LinearLayout.LayoutParams(-1, Ui.dp(this, 54)))
+        top.addView(refresh, LinearLayout.LayoutParams(-2, Ui.dp(this, 40)))
+        root.addView(top, LinearLayout.LayoutParams(-1, Ui.dp(this, 48)))
 
         hero = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = Ui.panel(context)
-            setPadding(Ui.dp(context, 16), Ui.dp(context, 14), Ui.dp(context, 16), Ui.dp(context, 14))
+            setPadding(Ui.dp(context, 14), Ui.dp(context, 8), Ui.dp(context, 14), Ui.dp(context, 8))
         }
         hero.addView(Ui.text(this, "正在读取 UP 主资料…", 15f, Ui.muted))
-        root.addView(hero, LinearLayout.LayoutParams(-1, Ui.dp(this, 174)).apply { topMargin = Ui.dp(this@UpProfileActivity, 8) })
+        root.addView(hero, LinearLayout.LayoutParams(-1, Ui.dp(this, 108)).apply { topMargin = Ui.dp(this@UpProfileActivity, 5) })
 
         val tabs = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         latestTab = Ui.chip(this, "最新投稿", true) { switchOrder("pubdate") }
         popularTab = Ui.chip(this, "最多播放", false) { switchOrder("click") }
-        tabs.addView(latestTab, LinearLayout.LayoutParams(-2, Ui.dp(this, 42)))
-        tabs.addView(popularTab, LinearLayout.LayoutParams(-2, Ui.dp(this, 42)).apply { marginStart = Ui.dp(this@UpProfileActivity, 8) })
-        root.addView(tabs, LinearLayout.LayoutParams(-1, Ui.dp(this, 52)).apply { topMargin = Ui.dp(this@UpProfileActivity, 8) })
+        tabs.addView(latestTab, LinearLayout.LayoutParams(-2, Ui.dp(this, 40)))
+        tabs.addView(popularTab, LinearLayout.LayoutParams(-2, Ui.dp(this, 40)).apply { marginStart = Ui.dp(this@UpProfileActivity, 8) })
+        root.addView(tabs, LinearLayout.LayoutParams(-1, Ui.dp(this, 44)).apply { topMargin = Ui.dp(this@UpProfileActivity, 4) })
 
         status = Ui.text(this, "", 13f, Ui.muted).apply { setPadding(Ui.dp(context, 4), 0, 0, 0) }
-        root.addView(status, LinearLayout.LayoutParams(-1, Ui.dp(this, 28)))
+        root.addView(status, LinearLayout.LayoutParams(-1, Ui.dp(this, 24)))
 
         val columns = Ui.videoColumns(this)
         grid = RecyclerView(this).apply {
@@ -170,18 +170,19 @@ class UpProfileActivity : AppCompatActivity() {
     }
 
     private fun renderProfile(user: UserProfile) {
+        val restoreFollowFocus = ::followButton.isInitialized && followButton.hasFocus()
         hero.removeAllViews()
         val line = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         val avatar = Ui.avatar(this)
-        line.addView(avatar, LinearLayout.LayoutParams(Ui.dp(this, 92), Ui.dp(this, 92)))
+        line.addView(avatar, LinearLayout.LayoutParams(Ui.dp(this, 68), Ui.dp(this, 68)))
         CoverLoader.load(avatar, user.avatarUrl)
 
         val info = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(Ui.dp(context, 16), 0, Ui.dp(context, 12), 0)
+            setPadding(Ui.dp(context, 14), 0, Ui.dp(context, 12), 0)
         }
-        val name = Ui.text(this, user.name, 22f).apply { setPadding(0, 0, 0, Ui.dp(context, 4)) }
-        info.addView(name, LinearLayout.LayoutParams(-1, Ui.dp(this, 38)))
+        val name = Ui.text(this, user.name, 20f).apply { setPadding(0, 0, 0, 0); maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }
+        info.addView(name, LinearLayout.LayoutParams(-1, Ui.dp(this, 28)))
         val badge = buildString {
             if (user.verification.isNotBlank()) append("认证 · ${user.verification}")
             if (user.level > 0) {
@@ -193,22 +194,22 @@ class UpProfileActivity : AppCompatActivity() {
                 append("正在直播")
             }
         }.ifBlank { "哔哩哔哩用户" }
-        info.addView(Ui.text(this, badge, 13f, if (user.liveStatus) Ui.pink else Ui.muted).apply { setPadding(0, 0, 0, Ui.dp(context, 4)) })
-        info.addView(Ui.text(this, "关注 ${count(user.followingCount)}   粉丝 ${count(user.followerCount)}   投稿 ${count(user.videoCount)}", 13f, Ui.muted).apply {
-            setPadding(0, 0, 0, Ui.dp(context, 4))
-        })
+        info.addView(Ui.text(this, badge, 12f, if (user.liveStatus) Ui.pink else Ui.muted).apply { setPadding(0, 0, 0, 0); maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }, LinearLayout.LayoutParams(-1, Ui.dp(this, 21)))
+        info.addView(Ui.text(this, "关注 ${count(user.followingCount)}   粉丝 ${count(user.followerCount)}   投稿 ${count(user.videoCount)}", 12f, Ui.muted).apply {
+            setPadding(0, 0, 0, 0); maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(-1, Ui.dp(this, 21)))
         info.addView(Ui.text(this, user.signature.ifBlank { "这个 UP 主还没有填写简介" }, 13f, Ui.muted).apply {
-            maxLines = 2
+            maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
             setPadding(0, 0, 0, 0)
-        })
+        }, LinearLayout.LayoutParams(-1, Ui.dp(this, 22)))
         line.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
         followButton = Ui.button(this, followLabel(user)) { toggleFollow() }.apply {
             tag = "up/follow"
-            minWidth = Ui.dp(context, 132)
-            setTextSize(15f)
+            minWidth = Ui.dp(context, 112)
+            setTextSize(14f)
         }
-        line.addView(followButton, LinearLayout.LayoutParams(Ui.dp(this, 142), Ui.dp(this, 48)))
+        line.addView(followButton, LinearLayout.LayoutParams(Ui.dp(this, 122), Ui.dp(this, 42)))
         hero.addView(line, LinearLayout.LayoutParams(-1, -2, 1f))
         Ui.focusHighlight(followButton)
         followButton.setOnKeyListener { _, key, event ->
@@ -218,13 +219,14 @@ class UpProfileActivity : AppCompatActivity() {
                 latestTab.requestFocus(); true
             } else false
         }
+        if (restoreFollowFocus) followButton.post { followButton.requestFocus() }
     }
 
     private fun switchOrder(next: String) {
         if (order == next && videos.isNotEmpty()) return
         order = next
-        latestTab.background = Ui.roundedBackground(if (next == "pubdate") Ui.blue else Ui.surfaceRaised, Ui.dp(this, 17))
-        popularTab.background = Ui.roundedBackground(if (next == "click") Ui.blue else Ui.surfaceRaised, Ui.dp(this, 17))
+        Ui.setChipSelected(latestTab, next == "pubdate")
+        Ui.setChipSelected(popularTab, next == "click")
         videos.clear(); page = 0; hasMore = true; focusedBvid = null
         adapter.submitList(emptyList())
         loadNext()

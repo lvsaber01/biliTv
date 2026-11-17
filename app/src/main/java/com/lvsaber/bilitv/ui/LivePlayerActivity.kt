@@ -5,6 +5,7 @@ import android.graphics.RectF
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
 import android.view.KeyEvent
@@ -46,10 +47,12 @@ import com.lvsaber.bilitv.data.LiveRoomDetails
 import com.lvsaber.bilitv.data.LiveRoomSummary
 import com.lvsaber.bilitv.data.LiveStreamProfile
 import com.lvsaber.bilitv.data.LiveRecoveryPolicy
+import com.lvsaber.bilitv.data.LiveStreamRefreshPolicy
 import com.lvsaber.bilitv.data.PlaybackCodec
 import com.lvsaber.bilitv.data.PlaybackDeviceCapabilities
 import java.util.concurrent.atomic.AtomicInteger
 
+@androidx.media3.common.util.UnstableApi
 class LivePlayerActivity : AppCompatActivity() {
     private lateinit var api: BiliApiClient
     private lateinit var library: LiveLibraryRepository
@@ -87,6 +90,13 @@ class LivePlayerActivity : AppCompatActivity() {
     private var firstFrameRendered = false
     private var sessionGeneration = 0
     private var streamGeneration = 0
+    private var streamAddressIssuedAtElapsedRealtimeMs = 0L
+    private var addressRefreshInProgress = false
+    private var addressRefreshAttempted = false
+    private var pendingPlaybackFailure: Throwable? = null
+    private var addressRenewalFailureCount = 0
+    private var streamRenewalRunnable: Runnable? = null
+    private var liveStallRunnable: Runnable? = null
     private var startTimeoutRunnable: Runnable? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private val controlsTimeout = Runnable { hideControls() }
@@ -279,14 +289,35 @@ class LivePlayerActivity : AppCompatActivity() {
         }
     }
 
-    private fun requestStream(requestedQuality: Int) {
+    private fun requestStream(
+        requestedQuality: Int,
+        renewal: Boolean = false,
+        showRenewalStatus: Boolean = true,
+    ) {
         val currentRoom = room ?: return
+        if (renewal && addressRefreshInProgress) return
+        val previousAttempt = attempts.getOrNull(currentAttemptIndex)
         val token = ++streamGeneration
-        playbackErrorMessage = null
-        firstFrameRendered = false
-        status.text = "正在获取直播流…"
-        status.visibility = View.VISIBLE
-        errorPanel.visibility = View.GONE
+        streamRenewalRunnable?.let(mainHandler::removeCallbacks)
+        streamRenewalRunnable = null
+        if (renewal) {
+            addressRefreshInProgress = true
+            if (showRenewalStatus) {
+                status.text = "正在更新直播连接…"
+                status.visibility = View.VISIBLE
+                errorPanel.visibility = View.GONE
+            }
+        } else {
+            addressRefreshInProgress = false
+            addressRefreshAttempted = false
+            pendingPlaybackFailure = null
+            addressRenewalFailureCount = 0
+            playbackErrorMessage = null
+            firstFrameRendered = false
+            status.text = "正在获取直播流…"
+            status.visibility = View.VISIBLE
+            errorPanel.visibility = View.GONE
+        }
         val protocol = settings.liveProtocolPreference
         val codec = settings.liveCodecPreference
         val initialQn = requestedQuality.takeIf { it > 0 } ?: 10_000
@@ -305,6 +336,7 @@ class LivePlayerActivity : AppCompatActivity() {
             }
             runOnUiThread {
                 if (token != streamGeneration || isFinishing || isDestroyed) return@runOnUiThread
+                addressRefreshInProgress = false
                 result.onSuccess { (availableQualities, chosenQn, streamProfiles) ->
                     qualities = availableQualities
                     profiles = streamProfiles
@@ -315,35 +347,86 @@ class LivePlayerActivity : AppCompatActivity() {
                     }
                     val capabilities = runCatching { PlaybackDeviceCapabilities.detect(this) }
                         .getOrElse { PlaybackDeviceCapabilities.unrestricted() }
-                    attempts = LiveRecoveryPolicy.attempts(
+                    val refreshedAttempts = LiveRecoveryPolicy.attempts(
                         streamProfiles,
                         chosenQn,
                         settings.liveProtocolPreference,
                         settings.liveCodecPreference,
                         capabilities.supportedCodecs,
                     )
-                    Log.i(TAG, "Live profiles=${streamProfiles.size} usableAttempts=${attempts.size} quality=$chosenQn codec=${settings.liveCodecPreference} protocol=${settings.liveProtocolPreference}")
-                    if (attempts.isEmpty()) {
-                        showFatal("该直播间当前没有设备可用的 ${settings.liveCodecPreference.label} / ${settings.liveProtocolPreference.label} 流。可在设置或播放器中尝试其他选项。")
+                    Log.i(TAG, "Live profiles=${streamProfiles.size} usableAttempts=${refreshedAttempts.size} quality=$chosenQn codec=${settings.liveCodecPreference} protocol=${settings.liveProtocolPreference}")
+                    if (refreshedAttempts.isEmpty()) {
+                        if (renewal) {
+                            val failed = pendingPlaybackFailure
+                            pendingPlaybackFailure = null
+                            if (failed != null) handleCachedPlaybackFailure(failed)
+                            else {
+                                status.visibility = View.GONE
+                                scheduleAddressRenewalRetry()
+                            }
+                        } else {
+                            attempts = emptyList()
+                            showFatal("该直播间当前没有设备可用的 ${settings.liveCodecPreference.label} / ${settings.liveProtocolPreference.label} 流。可在设置或播放器中尝试其他选项。")
+                        }
                     } else {
+                        attempts = refreshedAttempts
+                        streamAddressIssuedAtElapsedRealtimeMs = SystemClock.elapsedRealtime()
                         automaticRetriesUsed = 0
-                        currentAttemptIndex = 0
-                        playAttempt(attempts.first(), automatic = false)
+                        addressRenewalFailureCount = 0
+                        currentAttemptIndex = if (renewal) matchingAttemptIndex(previousAttempt) else 0
+                        firstFrameRendered = false
+                        val failed = pendingPlaybackFailure
+                        pendingPlaybackFailure = null
+                        scheduleStreamAddressRenewal()
+                        playAttempt(attempts[currentAttemptIndex], automatic = renewal, addressRenewal = renewal)
+                        if (failed != null) Log.i(TAG, "Recovered live playback with refreshed stream address")
                     }
                     updateControlLabels()
-                }.onFailure { showFatal("无法获取直播流：${friendlyMessage(it)}") }
+                }.onFailure { error ->
+                    if (renewal) {
+                        val failed = pendingPlaybackFailure
+                        pendingPlaybackFailure = null
+                        if (failed != null) handleCachedPlaybackFailure(failed)
+                        else {
+                            status.visibility = View.GONE
+                            Log.w(TAG, "Live address renewal failed (${error.javaClass.simpleName}); keeping the current stream")
+                            scheduleAddressRenewalRetry()
+                        }
+                    } else {
+                        showFatal("无法获取直播流：${friendlyMessage(error)}")
+                    }
+                }
             }
         }
     }
 
-    private fun playAttempt(attempt: LivePlaybackAttempt, automatic: Boolean) {
+    private fun matchingAttemptIndex(previous: LivePlaybackAttempt?): Int {
+        if (previous == null) return 0
+        return attempts.indexOfFirst { candidate ->
+            candidate.profile.qualityId == previous.profile.qualityId &&
+                candidate.profile.protocol == previous.profile.protocol &&
+                candidate.profile.codec == previous.profile.codec &&
+                candidate.profile.format == previous.profile.format &&
+                candidate.route.label == previous.route.label
+        }.takeIf { it >= 0 } ?: attempts.indexOfFirst {
+            it.profile.protocol == previous.profile.protocol && it.profile.codec == previous.profile.codec
+        }.takeIf { it >= 0 } ?: 0
+    }
+
+    private fun playAttempt(attempt: LivePlaybackAttempt, automatic: Boolean, addressRenewal: Boolean = false) {
         val currentRoom = room ?: return
+        val resumePlayback = player?.playWhenReady ?: true
         playbackErrorMessage = null
+        firstFrameRendered = false
         Log.i(TAG, "Starting live qn=${attempt.profile.qualityId} protocol=${attempt.profile.protocol} codec=${attempt.profile.codec} route=${attempt.route.label} automatic=$automatic retry=$automaticRetriesUsed")
         releasePlayerOnly()
         errorPanel.visibility = View.GONE
         status.visibility = View.VISIBLE
-        status.text = if (automatic) "线路异常，正在尝试 ${attempt.route.label} · ${attempt.profile.protocol.label}…" else "正在连接 ${attempt.route.label} · ${attempt.profile.protocol.label}…"
+        status.text = when {
+            addressRenewal -> "正在续接直播流…"
+            automatic -> "线路异常，正在尝试 ${attempt.route.label} · ${attempt.profile.protocol.label}…"
+            else -> "正在连接 ${attempt.route.label} · ${attempt.profile.protocol.label}…"
+        }
         val httpFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(PLAYER_USER_AGENT)
             .setConnectTimeoutMs(10_000)
@@ -360,13 +443,18 @@ class LivePlayerActivity : AppCompatActivity() {
                     if (firstFrameRendered) status.text = "正在缓冲直播…"
                     else status.text = "正在连接直播流…"
                     status.visibility = View.VISIBLE
+                    if (firstFrameRendered) scheduleLiveStallTimeout(exo)
                 } else if (playbackState == Player.STATE_READY && firstFrameRendered) {
+                    liveStallRunnable?.let(mainHandler::removeCallbacks)
+                    liveStallRunnable = null
                     status.visibility = View.GONE
                 }
             }
 
             override fun onPlayerError(error: PlaybackException) {
                 startTimeoutRunnable?.let(mainHandler::removeCallbacks)
+                liveStallRunnable?.let(mainHandler::removeCallbacks)
+                liveStallRunnable = null
                 handlePlaybackFailure(error)
             }
         })
@@ -375,12 +463,16 @@ class LivePlayerActivity : AppCompatActivity() {
                 runOnUiThread {
                     if (player !== exo || isFinishing || isDestroyed) return@runOnUiThread
                     firstFrameRendered = true
+                    addressRefreshAttempted = false
+                    pendingPlaybackFailure = null
                     startTimeoutRunnable?.let(mainHandler::removeCallbacks)
                     startTimeoutRunnable = null
                     status.visibility = View.GONE
                     errorPanel.visibility = View.GONE
                     header.visibility = if (controlsVisible) View.VISIBLE else View.GONE
                     updateControlLabels()
+                    scheduleStreamAddressRenewal()
+                    if (exo.playbackState == Player.STATE_BUFFERING) scheduleLiveStallTimeout(exo)
                     armControlsTimeout()
                 }
             }
@@ -390,7 +482,7 @@ class LivePlayerActivity : AppCompatActivity() {
             itemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
         }
         exo.setMediaItem(itemBuilder.build())
-        exo.playWhenReady = true
+        exo.playWhenReady = resumePlayback
         exo.prepare()
         scheduleStartTimeout(exo)
         updateControlLabels()
@@ -399,7 +491,7 @@ class LivePlayerActivity : AppCompatActivity() {
     private fun scheduleStartTimeout(target: ExoPlayer) {
         startTimeoutRunnable?.let(mainHandler::removeCallbacks)
         val timeout = Runnable {
-            if (player === target && !firstFrameRendered && !isFinishing && !isDestroyed) {
+            if (player === target && !firstFrameRendered && target.playWhenReady && !isFinishing && !isDestroyed) {
                 handlePlaybackFailure(BiliApiException(-1008, "直播首帧等待超时"))
             }
         }
@@ -408,6 +500,33 @@ class LivePlayerActivity : AppCompatActivity() {
     }
 
     private fun handlePlaybackFailure(error: Throwable) {
+        status.visibility = View.GONE
+        liveStallRunnable?.let(mainHandler::removeCallbacks)
+        liveStallRunnable = null
+        if (addressRefreshInProgress) {
+            addressRefreshAttempted = true
+            pendingPlaybackFailure = error
+            return
+        }
+        val currentRoute = attempts.getOrNull(currentAttemptIndex)?.route
+        val addressExpiredOrUnknown = LiveStreamRefreshPolicy.shouldRefreshAfterFailure(
+            route = currentRoute,
+            issuedAtElapsedRealtimeMs = streamAddressIssuedAtElapsedRealtimeMs,
+            nowElapsedRealtimeMs = SystemClock.elapsedRealtime(),
+            nowEpochSeconds = System.currentTimeMillis() / 1_000L,
+        )
+        if (firstFrameRendered && !addressRefreshAttempted && addressExpiredOrUnknown &&
+            settings.liveAutoRecoveryEnabled && isRecoverable(error)
+        ) {
+            addressRefreshAttempted = true
+            pendingPlaybackFailure = error
+            requestStream(currentQualityId.takeIf { it > 0 } ?: settings.liveQualityId, renewal = true)
+            return
+        }
+        handleCachedPlaybackFailure(error)
+    }
+
+    private fun handleCachedPlaybackFailure(error: Throwable) {
         status.visibility = View.GONE
         val nextIndex = LiveRecoveryPolicy.nextAttempt(
             attempts,
@@ -429,6 +548,54 @@ class LivePlayerActivity : AppCompatActivity() {
         showPlaybackError("直播播放失败：${friendlyMessage(error)}")
     }
 
+    private fun scheduleStreamAddressRenewal() {
+        streamRenewalRunnable?.let(mainHandler::removeCallbacks)
+        streamRenewalRunnable = null
+        if (attempts.isEmpty() || streamAddressIssuedAtElapsedRealtimeMs <= 0L) return
+        val delayMs = LiveStreamRefreshPolicy.delayMs(
+            routes = attempts.map { it.route }.distinctBy { it.url },
+            issuedAtElapsedRealtimeMs = streamAddressIssuedAtElapsedRealtimeMs,
+            nowElapsedRealtimeMs = SystemClock.elapsedRealtime(),
+            nowEpochSeconds = System.currentTimeMillis() / 1_000L,
+        ) ?: return
+        val renewal = Runnable {
+            streamRenewalRunnable = null
+            if (player != null && !isFinishing && !isDestroyed && !addressRefreshInProgress) {
+                requestStream(currentQualityId, renewal = true, showRenewalStatus = false)
+            }
+        }
+        streamRenewalRunnable = renewal
+        mainHandler.postDelayed(renewal, delayMs)
+    }
+
+    private fun scheduleAddressRenewalRetry() {
+        streamRenewalRunnable?.let(mainHandler::removeCallbacks)
+        streamRenewalRunnable = null
+        val delayMs = ADDRESS_RENEWAL_RETRY_DELAYS_MS.getOrNull(addressRenewalFailureCount++) ?: return
+        val retry = Runnable {
+            streamRenewalRunnable = null
+            if (player != null && !isFinishing && !isDestroyed && !addressRefreshInProgress) {
+                requestStream(currentQualityId, renewal = true, showRenewalStatus = false)
+            }
+        }
+        streamRenewalRunnable = retry
+        mainHandler.postDelayed(retry, delayMs)
+    }
+
+    private fun scheduleLiveStallTimeout(target: ExoPlayer) {
+        liveStallRunnable?.let(mainHandler::removeCallbacks)
+        val timeout = Runnable {
+            if (player === target && firstFrameRendered && target.playWhenReady &&
+                target.playbackState == Player.STATE_BUFFERING && !isFinishing && !isDestroyed
+            ) {
+                Log.w(TAG, "Live stream remained buffering; attempting address renewal/recovery")
+                handlePlaybackFailure(BiliApiException(-1008, "直播流长时间缓冲，正在尝试恢复"))
+            }
+        }
+        liveStallRunnable = timeout
+        mainHandler.postDelayed(timeout, LIVE_BUFFER_STALL_TIMEOUT_MS)
+    }
+
     private fun isRecoverable(error: Throwable): Boolean {
         if (error is BiliApiException) return error.apiCode == -1008 || error.httpCode?.let { it in 500..599 } == true
         val playback = error as? PlaybackException ?: return error.message?.contains("timeout", true) == true
@@ -436,6 +603,10 @@ class LivePlayerActivity : AppCompatActivity() {
     }
 
     private fun showPlaybackError(message: String) {
+        streamRenewalRunnable?.let(mainHandler::removeCallbacks)
+        streamRenewalRunnable = null
+        liveStallRunnable?.let(mainHandler::removeCallbacks)
+        liveStallRunnable = null
         firstFrameRendered = false
         playbackErrorMessage = message
         errorText.text = message
@@ -448,6 +619,10 @@ class LivePlayerActivity : AppCompatActivity() {
     }
 
     private fun showFatal(message: String) {
+        streamRenewalRunnable?.let(mainHandler::removeCallbacks)
+        streamRenewalRunnable = null
+        liveStallRunnable?.let(mainHandler::removeCallbacks)
+        liveStallRunnable = null
         releasePlayerOnly()
         playbackErrorMessage = message
         errorText.text = message
@@ -462,18 +637,17 @@ class LivePlayerActivity : AppCompatActivity() {
     }
 
     private fun retryManually() {
-        if (attempts.isEmpty()) {
-            room?.let { requestStream(settings.liveQualityId) }
-            return
-        }
-        currentAttemptIndex = 0
-        automaticRetriesUsed = 0
-        playAttempt(attempts.first(), automatic = false)
+        requestStream(currentQualityId.takeIf { it > 0 } ?: settings.liveQualityId)
     }
 
     private fun togglePlayback() {
         val exo = player ?: return
-        if (exo.isPlaying) exo.pause() else exo.play()
+        if (exo.playWhenReady) {
+            exo.pause()
+        } else {
+            exo.play()
+            if (!firstFrameRendered) scheduleStartTimeout(exo)
+        }
         updatePlayButton()
         armControlsTimeout()
     }
@@ -613,7 +787,7 @@ class LivePlayerActivity : AppCompatActivity() {
     }
 
     private fun updatePlayButton() {
-        playButton.text = if (player?.isPlaying == true) "暂停" else "播放"
+        playButton.text = if (player?.playWhenReady == true) "暂停" else "播放"
     }
 
     private fun showControls(focusFirst: Boolean) {
@@ -701,6 +875,8 @@ class LivePlayerActivity : AppCompatActivity() {
     private fun releasePlayerOnly() {
         startTimeoutRunnable?.let(mainHandler::removeCallbacks)
         startTimeoutRunnable = null
+        liveStallRunnable?.let(mainHandler::removeCallbacks)
+        liveStallRunnable = null
         playerView.player = null
         player?.release()
         player = null
@@ -709,6 +885,10 @@ class LivePlayerActivity : AppCompatActivity() {
     private fun releaseSession() {
         sessionGeneration++
         streamGeneration++
+        streamRenewalRunnable?.let(mainHandler::removeCallbacks)
+        streamRenewalRunnable = null
+        addressRefreshInProgress = false
+        pendingPlaybackFailure = null
         mainHandler.removeCallbacks(controlsTimeout)
         danmakuClient?.disconnect()
         danmakuClient = null
@@ -740,7 +920,9 @@ class LivePlayerActivity : AppCompatActivity() {
         const val EXTRA_ROOM_ID = "live_room_id"
         private const val PLAYER_USER_AGENT = "Mozilla/5.0 (Linux; Android TV) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"
         private const val START_TIMEOUT_MS = 12_000L
+        private const val LIVE_BUFFER_STALL_TIMEOUT_MS = 30_000L
         private const val CONTROLS_HIDE_DELAY_MS = 5_000L
         private const val CONTROLS_FADE_MS = 180L
+        private val ADDRESS_RENEWAL_RETRY_DELAYS_MS = longArrayOf(30_000L, 60_000L, 120_000L)
     }
 }

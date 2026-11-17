@@ -21,8 +21,8 @@ class PgcCardView(
     enum class Style { CHANNEL, EPISODE }
 
     private val poster = Ui.poster(context)
-    private val title = Ui.text(context, size = if (style == Style.CHANNEL) 13f else 14f, color = Ui.text)
-    private val subtitle = Ui.text(context, size = if (style == Style.CHANNEL) 10f else 12f, color = Ui.muted)
+    private val title = Ui.text(context, size = if (style == Style.CHANNEL) 15f else 14f, color = Ui.text)
+    private val subtitle = Ui.text(context, size = if (style == Style.CHANNEL) 11.5f else 12f, color = Ui.muted)
     private val bar = View(context)
     private var boundKey = ""
 
@@ -33,16 +33,17 @@ class PgcCardView(
         gravity = Gravity.TOP
         isFocusable = true
         isClickable = true
-        background = Ui.roundedBackground(Ui.surface, Ui.dp(context, 10))
+        background = Ui.panel(context)
         clipToOutline = true
         if (channelCard) setPadding(Ui.dp(context, 6), Ui.dp(context, 2), Ui.dp(context, 6), Ui.dp(context, 2))
         val posterHeight = if (channelCard) -2 else Ui.dp(context, if (compact) 152 else 204)
         addView(poster, LayoutParams(-1, posterHeight))
         title.maxLines = 2
         title.ellipsize = android.text.TextUtils.TruncateAt.END
+        title.includeFontPadding = false
         if (channelCard) {
             title.setPadding(Ui.dp(context, 2), 0, Ui.dp(context, 2), 0)
-            title.setLineSpacing(Ui.dp(context, 1).toFloat(), 1.15f)
+            title.setLineSpacing(0f, 1.15f)
             title.minHeight = Ui.dp(context, 40)
         }
         addView(title, LayoutParams(-1, if (channelCard) -2 else Ui.dp(context, if (compact) 42 else 46)).apply {
@@ -54,6 +55,7 @@ class PgcCardView(
         })
         subtitle.maxLines = 1
         subtitle.ellipsize = android.text.TextUtils.TruncateAt.END
+        subtitle.includeFontPadding = false
         if (channelCard) subtitle.setPadding(Ui.dp(context, 2), 0, Ui.dp(context, 2), 0)
         addView(subtitle, LayoutParams(-1, Ui.dp(context, if (channelCard) 14 else if (compact) 26 else 28)).apply {
             if (!channelCard) {
@@ -237,6 +239,7 @@ object PgcTimelineFocusPolicy {
     }
 }
 
+@androidx.media3.common.util.UnstableApi
 object PgcPlaybackLauncher {
     fun createIntent(context: android.content.Context, playable: com.lvsaber.bilitv.data.PgcPlayableRef, startMs: Long = 0L): android.content.Intent =
         android.content.Intent(context, PlayerActivity::class.java).apply {

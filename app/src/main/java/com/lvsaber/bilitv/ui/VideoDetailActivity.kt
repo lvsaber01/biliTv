@@ -41,12 +41,12 @@ class VideoDetailActivity : AppCompatActivity() {
     private fun buildPage(bvid: String): View {
         val scroll = NestedScrollView(this).apply {
             isFillViewport = true
-            setBackgroundColor(Ui.background)
+            background = Ui.pageBackground(context)
         }
         body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Ui.background)
-            setPadding(Ui.dp(context, 22), Ui.dp(context, 12), Ui.dp(context, 22), Ui.dp(context, 28))
+            background = android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT)
+            setPadding(Ui.pageInset(context), Ui.dp(context, 12), Ui.pageInset(context), Ui.dp(context, 28))
         }
         val top = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         top.addView(Ui.chip(this, "‹ 返回", false) { finish() }, LinearLayout.LayoutParams(-2, Ui.dp(this, 38)))
@@ -92,7 +92,8 @@ class VideoDetailActivity : AppCompatActivity() {
         val poster = Ui.poster(this)
         // LayoutParams are in dp. Weight the poster against the measured hero
         // width instead of feeding physical display pixels into a dp slot.
-        hero.addView(poster, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.34f).apply {
+        val posterWeight = if (Ui.isCompactWidth(this)) 0.34f else 0.24f
+        hero.addView(poster, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, posterWeight).apply {
             marginEnd = Ui.dp(this@VideoDetailActivity, 14)
         })
         CoverLoader.load(poster, summary.coverUrl)

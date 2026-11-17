@@ -76,7 +76,53 @@ data class LiveRoomDetails(
 
 data class LiveQualityOption(val id: Int, val label: String)
 
-data class LiveStreamRoute(val label: String, val url: String)
+data class LiveStreamRoute(
+    val label: String,
+    val url: String,
+    val streamTtlSeconds: Long = 0L,
+    val expiresAtEpochSeconds: Long? = null,
+)
+
+/** Schedules a live URL renewal shortly before its API-provided lifetime ends. */
+object LiveStreamRefreshPolicy {
+    private const val REFRESH_LEAD_MS = 120_000L
+    private const val MIN_REFRESH_DELAY_MS = 10_000L
+
+    fun delayMs(
+        routes: List<LiveStreamRoute>,
+        issuedAtElapsedRealtimeMs: Long,
+        nowElapsedRealtimeMs: Long,
+        nowEpochSeconds: Long,
+    ): Long? {
+        val elapsedSinceIssue = (nowElapsedRealtimeMs - issuedAtElapsedRealtimeMs).coerceAtLeast(0L)
+        return routes.mapNotNull { route ->
+            val remainingFromTtl = route.streamTtlSeconds.takeIf { it > 0L }
+                ?.let { it * 1_000L - elapsedSinceIssue }
+            val remainingFromExpiry = route.expiresAtEpochSeconds
+                ?.let { (it - nowEpochSeconds) * 1_000L }
+            // TTL is relative to the response and therefore survives device clock skew.
+            val remaining = remainingFromTtl ?: remainingFromExpiry ?: return@mapNotNull null
+            val refreshLead = minOf(REFRESH_LEAD_MS, maxOf(1_000L, remaining.coerceAtLeast(0L) / 10L))
+            (remaining - refreshLead).coerceAtLeast(MIN_REFRESH_DELAY_MS)
+        }.minOrNull()
+    }
+
+    fun shouldRefreshAfterFailure(
+        route: LiveStreamRoute?,
+        issuedAtElapsedRealtimeMs: Long,
+        nowElapsedRealtimeMs: Long,
+        nowEpochSeconds: Long,
+    ): Boolean {
+        if (route == null || (route.streamTtlSeconds <= 0L && route.expiresAtEpochSeconds == null)) return true
+        val elapsedSinceIssue = (nowElapsedRealtimeMs - issuedAtElapsedRealtimeMs).coerceAtLeast(0L)
+        val remainingFromTtl = route.streamTtlSeconds.takeIf { it > 0L }
+            ?.let { it * 1_000L - elapsedSinceIssue }
+        val remainingFromExpiry = route.expiresAtEpochSeconds
+            ?.let { (it - nowEpochSeconds) * 1_000L }
+        val remaining = remainingFromTtl ?: remainingFromExpiry ?: return true
+        return remaining <= REFRESH_LEAD_MS
+    }
+}
 
 data class LiveStreamProfile(
     val qualityId: Int,
@@ -240,7 +286,14 @@ object LiveApiParser {
                             val extra = route.optString("extra").takeUnless { it == "null" }.orEmpty()
                             val url = normalizeUrl(host + base + extra)
                             if (host.isNotBlank() && base.isNotBlank() && url.startsWith("https://")) {
-                                add(LiveStreamRoute(if (routeIndex == 0) "主线" else "备线 $routeIndex", url))
+                                add(
+                                    LiveStreamRoute(
+                                        label = if (routeIndex == 0) "主线" else "备线 $routeIndex",
+                                        url = url,
+                                        streamTtlSeconds = route.optLong("stream_ttl").coerceAtLeast(0L),
+                                        expiresAtEpochSeconds = urlExpiry(url),
+                                    ),
+                                )
                             }
                         }
                     }.distinctBy { it.url }
@@ -324,6 +377,15 @@ object LiveApiParser {
         80 -> "流畅"
         else -> "画质 $id"
     }
+
+    private fun urlExpiry(url: String): Long? = url.substringAfter('?', "")
+        .split('&')
+        .firstNotNullOfOrNull { parameter ->
+            val key = parameter.substringBefore('=').lowercase()
+            if (key == "expires" || key == "deadline") {
+                parameter.substringAfter('=', "").toLongOrNull()
+            } else null
+        }
 
     private fun normalizeUrl(value: String): String = when {
         value.startsWith("//") -> "https:$value"

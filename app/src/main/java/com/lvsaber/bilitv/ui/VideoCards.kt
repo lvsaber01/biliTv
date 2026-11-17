@@ -10,14 +10,15 @@ import android.view.View
 import com.lvsaber.bilitv.data.ProgressRepository
 import com.lvsaber.bilitv.data.VideoSummary
 import androidx.media3.common.util.UnstableApi
+import kotlin.math.ceil
 
 /** A holder is reused; appending does not rebind existing cards. */
 @UnstableApi
 class VideoCard(context: Context, @Suppress("UNUSED_PARAMETER") grid: Boolean = false) : LinearLayout(context) {
     private val poster = Ui.poster(context)
-    private val title = Ui.text(context, size = 13f)
-    private val subtitle = Ui.text(context, size = 10f, color = Ui.muted)
-    private val stats = Ui.text(context, size = 10f, color = Ui.muted)
+    private val title = Ui.text(context, size = 15f)
+    private val subtitle = Ui.text(context, size = 11.5f, color = Ui.muted)
+    private val stats = Ui.text(context, size = 11f, color = Ui.muted)
     private val progressBar = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply {
         max = 1000; progressTintList = android.content.res.ColorStateList.valueOf(Ui.blue)
         visibility = View.GONE
@@ -28,6 +29,7 @@ class VideoCard(context: Context, @Suppress("UNUSED_PARAMETER") grid: Boolean = 
     init {
         orientation = VERTICAL
         background = Ui.panel(context)
+        clipToOutline = true
         isClickable = true
         isFocusable = true
         setPadding(Ui.dp(context, 6), Ui.dp(context, 2), Ui.dp(context, 6), Ui.dp(context, 2))
@@ -37,15 +39,18 @@ class VideoCard(context: Context, @Suppress("UNUSED_PARAMETER") grid: Boolean = 
         addView(cover, LayoutParams(-1, -2))
         title.maxLines = 2
         title.ellipsize = android.text.TextUtils.TruncateAt.END
+        title.includeFontPadding = false
         title.setPadding(2, 0, 2, 0)
-        title.setLineSpacing(Ui.dp(context, 1).toFloat(), 1.15f)
-        title.minHeight = Ui.dp(context, 40)
+        title.setLineSpacing(0f, 1f)
+        title.minHeight = Ui.dp(context, ceil(36f * resources.configuration.fontScale.coerceAtLeast(1f)).toInt())
         addView(title, LayoutParams(-1, -2))
         listOf(subtitle, stats).forEach { label ->
             label.maxLines = 1
             label.ellipsize = android.text.TextUtils.TruncateAt.END
+            label.includeFontPadding = false
             label.setPadding(2, 0, 2, 0)
-            addView(label, LayoutParams(-1, Ui.dp(context, 14)))
+            val metadataHeight = ceil(14f * resources.configuration.fontScale.coerceAtLeast(1f)).toInt()
+            addView(label, LayoutParams(-1, Ui.dp(context, metadataHeight)))
         }
         Ui.focusHighlight(this)
     }

@@ -27,7 +27,7 @@ class ChannelPickerFragment : DialogFragment() {
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(Ui.dp(context, 20), Ui.dp(context, 16), Ui.dp(context, 20), Ui.dp(context, 12))
-            setBackgroundColor(Ui.background)
+            background = Ui.pageBackground(context)
         }
         root.addView(Ui.text(context, "更多频道", 26f))
         root.addView(Ui.text(context, "未固定频道 · 选择后直接进入，不会自动占用顶部名额", 13f, Ui.muted))

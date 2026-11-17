@@ -2,6 +2,12 @@ package com.lvsaber.bilitv.ui
 
 import android.app.Activity
 import android.content.Intent
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
+import android.text.style.RelativeSizeSpan
+import android.text.style.StyleSpan
+import android.graphics.Typeface
 import android.view.Gravity
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -37,7 +43,14 @@ class AccountPage(host: Activity, openHistory: () -> Unit, openFavorites: () -> 
         fun tile(key: String, title: String, subtitle: String, action: () -> Unit) {
             val button = Ui.button(host, "$title\n$subtitle", action).apply {
                 tag = "account/$key"
-                setTextSize(18f); gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                val label = "$title\n$subtitle"
+                text = SpannableString(label).apply {
+                    setSpan(ForegroundColorSpan(Ui.text), 0, title.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    setSpan(StyleSpan(Typeface.BOLD), 0, title.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    setSpan(ForegroundColorSpan(Ui.muted), title.length + 1, label.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    setSpan(RelativeSizeSpan(0.78f), title.length + 1, label.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+                setTextSize(17f); gravity = Gravity.START or Gravity.CENTER_VERTICAL
                 background = Ui.panel(context); Ui.focusHighlight(this)
                 setPadding(Ui.dp(context, 20), 0, Ui.dp(context, 12), 0)
             }

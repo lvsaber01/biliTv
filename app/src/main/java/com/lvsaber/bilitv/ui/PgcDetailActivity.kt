@@ -98,7 +98,7 @@ class PgcDetailActivity : AppCompatActivity() {
     private fun buildPage(): View {
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Ui.background)
+            background = Ui.pageBackground(context)
             setPadding(Ui.dp(context, 22), Ui.dp(context, 10), Ui.dp(context, 22), Ui.dp(context, 10))
         }
         val heading = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }

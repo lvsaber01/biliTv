@@ -40,6 +40,7 @@ class LiveActivity : AppCompatActivity() {
     private lateinit var library: LiveLibraryRepository
     private lateinit var content: FrameLayout
     private lateinit var zoneButton: Button
+    private var zoneSwitchView: LinearLayout? = null
     private lateinit var navStrip: LinearLayout
     private lateinit var navScroll: HorizontalScrollView
     private val navButtons = linkedMapOf<String, Button>()
@@ -134,8 +135,8 @@ class LiveActivity : AppCompatActivity() {
     private fun buildRoot(): View {
         val compact = Ui.isCompactWidth(this)
         val root = FrameLayout(this).apply {
-            setBackgroundColor(Ui.background)
-            val padding = Ui.dp(context, if (compact) 8 else 20)
+            background = Ui.pageBackground(context)
+            val padding = if (compact) Ui.dp(context, 8) else Ui.pageInset(context)
             setPadding(padding, 0, padding, 0)
         }
         content = FrameLayout(this)
@@ -145,7 +146,7 @@ class LiveActivity : AppCompatActivity() {
         val toolbar = LinearLayout(this).apply {
             orientation = if (compact) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = Ui.roundedBackground(0xED151A21.toInt(), Ui.dp(context, 18))
+            background = Ui.floatingPanel(context)
             elevation = Ui.dp(context, 12).toFloat()
             val horizontal = Ui.dp(context, if (compact) 6 else 10)
             setPadding(horizontal, 0, horizontal, 0)
@@ -184,7 +185,13 @@ class LiveActivity : AppCompatActivity() {
             root.addView(toolbar, FrameLayout.LayoutParams(-1, Ui.dp(this, 100)).apply { topMargin = Ui.dp(this@LiveActivity, 14) })
         } else {
             toolbar.addView(logo, LinearLayout.LayoutParams(Ui.dp(this, 96), Ui.dp(this, 58)))
-            toolbar.addView(zoneButton)
+            zoneSwitchView = Ui.zoneSwitch(this, "live", ::openZone).apply {
+                layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(this@LiveActivity, 48)).apply {
+                    marginStart = Ui.dp(this@LiveActivity, 6)
+                    marginEnd = Ui.dp(this@LiveActivity, 6)
+                }
+            }
+            toolbar.addView(zoneSwitchView)
             toolbar.addView(navScroll, LinearLayout.LayoutParams(0, Ui.dp(this, 58), 1f))
             fixed.forEach { (key, label) ->
                 val button = navButton(label) { openGlobalPage(key) }
@@ -226,12 +233,21 @@ class LiveActivity : AppCompatActivity() {
     }
 
     private fun updateNavigation() {
+        zoneSwitchView?.let { Ui.setZoneSwitchSelection(it, "live") }
         (navButtons + fixedButtons).forEach { (key, button) ->
             val selected = key == pageKey
             button.setTextColor(if (selected) android.graphics.Color.WHITE else Ui.muted)
             button.background = Ui.roundedBackground(if (selected) 0x27FFFFFF else android.graphics.Color.TRANSPARENT, Ui.dp(this, 12))
         }
         zoneButton.text = "专区：直播 ▾"
+    }
+
+    private fun openZone(zone: String) {
+        when (zone) {
+            "video" -> startActivity(Intent(this, MainActivity::class.java))
+            "bangumi" -> startActivity(Intent(this, BangumiActivity::class.java))
+            "live" -> showPage(PAGE_RECOMMEND)
+        }
     }
 
     private fun showZoneChooser() {
@@ -543,23 +559,20 @@ class LiveActivity : AppCompatActivity() {
 
     private fun showSearchPage() {
         val page = basePage("搜索直播间")
-        val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        val input = EditText(this).apply {
-            hint = "搜索直播间 / 主播"
-            setSingleLine(true)
-            setTextColor(Ui.text)
-            setHintTextColor(Ui.muted)
-            background = Ui.panel(context)
+        val input = Ui.searchInput(this, "输入直播间或主播名称").apply {
             setText(lastSearchText)
             tag = "live-search-input"
         }
         activeSearchInput = input
-        row.addView(input, LinearLayout.LayoutParams(0, Ui.dp(this, 50), 1f))
         val submitButton = Ui.button(this, "搜索") { lastSearchText = input.text.toString().trim(); searchLiveRooms(reset = true) }
+            .apply { tag = "live-search-submit" }
         upperContentFocus = submitButton
-        row.addView(submitButton)
+        val row = Ui.searchBox(this, input, submitButton)
+        Ui.linkSearchFocus(input, submitButton)
+        page.addView(row, LinearLayout.LayoutParams(-1, if (Ui.isTelevision(this)) Ui.dp(this, 58) else Ui.dp(this, 64)).apply {
+            bottomMargin = Ui.dp(this@LiveActivity, 6)
+        })
         input.setOnEditorActionListener { _, _, _ -> lastSearchText = input.text.toString().trim(); searchLiveRooms(reset = true); true }
-        page.addView(row)
         attachStatusAndGrid(page)
         content.addView(page)
         if (lastSearchText.isNotBlank()) searchLiveRooms(reset = true)
@@ -569,26 +582,29 @@ class LiveActivity : AppCompatActivity() {
 
     private fun basePage(heading: String): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(0, Ui.dp(context, 2), 0, Ui.dp(context, 8))
+        setPadding(0, Ui.dp(context, 8), 0, Ui.dp(context, 8))
         addView(Ui.text(this@LiveActivity, heading, 18f, Ui.text).apply {
             setPadding(Ui.dp(context, 8), 0, Ui.dp(context, 8), 0)
-        }, LinearLayout.LayoutParams(-1, Ui.dp(this@LiveActivity, 34)))
+        }, LinearLayout.LayoutParams(-1, Ui.dp(this@LiveActivity, 42)))
     }
 
     private fun attachStatusAndGrid(parent: LinearLayout) {
         status = Ui.text(this, "", 13f, Ui.muted).apply { tag = "live-status" }
         val statusRow = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
-            addView(status, LinearLayout.LayoutParams(0, Ui.dp(this@LiveActivity, 28), 1f))
+            val statusHeight = Ui.dp(this@LiveActivity, if (Ui.isTelevision(this@LiveActivity)) 34 else 44)
+            addView(status, LinearLayout.LayoutParams(0, statusHeight, 1f))
             val retry = Ui.button(this@LiveActivity, "重试") { retryAction?.invoke() }.apply {
                 tag = "live-retry"
                 visibility = View.GONE
-                minHeight = Ui.dp(context, 30)
+                minHeight = Ui.dp(context, if (Ui.isTelevision(this@LiveActivity)) 34 else 44)
             }
             retryButton = retry
-            addView(retry, LinearLayout.LayoutParams(-2, Ui.dp(this@LiveActivity, 30)))
+            addView(retry, LinearLayout.LayoutParams(-2, statusHeight))
         }
-        parent.addView(statusRow, LinearLayout.LayoutParams(-1, Ui.dp(this, 30)))
+        parent.addView(statusRow, LinearLayout.LayoutParams(-1, Ui.dp(this, if (Ui.isTelevision(this)) 34 else 44)).apply {
+            topMargin = Ui.dp(this@LiveActivity, 8)
+        })
         grid = RecyclerView(this).apply {
             layoutManager = GridLayoutManager(this@LiveActivity, Ui.videoColumns(this@LiveActivity))
             itemAnimator = null

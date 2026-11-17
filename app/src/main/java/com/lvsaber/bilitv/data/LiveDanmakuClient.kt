@@ -2,6 +2,7 @@ package com.lvsaber.bilitv.data
 
 import android.util.Base64
 import android.util.Log
+import android.os.Build
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
@@ -22,6 +23,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLPeerUnverifiedException
 
 enum class LiveDanmakuState { CONNECTING, CONNECTED, RECONNECTING, UNAVAILABLE }
 
@@ -113,8 +116,15 @@ class LiveDanmakuClient(
         socket = created
         created.soTimeout = HANDSHAKE_TIMEOUT_MS
         created.connect(InetSocketAddress(host, port), HANDSHAKE_TIMEOUT_MS)
-        created.sslParameters = created.sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            created.sslParameters = created.sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
+        }
         created.startHandshake()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N &&
+            !HttpsURLConnection.getDefaultHostnameVerifier().verify(host, created.session)
+        ) {
+            throw SSLPeerUnverifiedException("TLS hostname verification failed")
+        }
         val keyBytes = ByteArray(16).also(secureRandom::nextBytes)
         val key = Base64.encodeToString(keyBytes, Base64.NO_WRAP)
         val output = created.outputStream

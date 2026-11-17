@@ -44,7 +44,7 @@ class FollowingActivity : AppCompatActivity() {
     private fun buildPage(): View {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Ui.background)
+            background = Ui.pageBackground(context)
             setPadding(Ui.dp(context, 20), Ui.dp(context, 14), Ui.dp(context, 20), Ui.dp(context, 12))
         }
         val top = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }

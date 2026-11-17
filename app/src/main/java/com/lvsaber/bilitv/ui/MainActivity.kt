@@ -35,6 +35,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var moreButton: Button
     private lateinit var homeButton: Button
     private lateinit var recommendButton: Button
+    private var zoneSwitchView: LinearLayout? = null
     private val navButtons = mutableMapOf<String, Button>()
     private val fixedButtons = mutableMapOf<String, Button>()
     private var historyPage: LibraryPage? = null
@@ -123,8 +124,8 @@ class MainActivity : AppCompatActivity() {
     private fun buildRoot(): View {
         val compact = Ui.isCompactWidth(this)
         val root = FrameLayout(this).apply {
-            setBackgroundColor(Ui.background)
-            val horizontalPadding = Ui.dp(context, if (compact) 8 else 20)
+            background = Ui.pageBackground(context)
+            val horizontalPadding = if (compact) Ui.dp(context, 8) else Ui.pageInset(context)
             setPadding(horizontalPadding, 0, horizontalPadding, 0)
         }
         content = FrameLayout(this)
@@ -134,7 +135,7 @@ class MainActivity : AppCompatActivity() {
         val toolbar = LinearLayout(this).apply {
             orientation = if (compact) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = Ui.roundedBackground(0xED151A21.toInt(), Ui.dp(context, 18))
+            background = Ui.floatingPanel(context)
             elevation = Ui.dp(context, 12).toFloat()
             val horizontalPadding = Ui.dp(context, if (compact) 6 else 10)
             setPadding(horizontalPadding, 0, horizontalPadding, 0)
@@ -181,7 +182,13 @@ class MainActivity : AppCompatActivity() {
             root.addView(toolbar, FrameLayout.LayoutParams(-1, Ui.dp(this, 100)).apply { topMargin = Ui.dp(this@MainActivity, 14) })
         } else {
             toolbar.addView(logo, LinearLayout.LayoutParams(Ui.dp(this, 96), Ui.dp(this, 58)))
-            toolbar.addView(homeButton)
+            zoneSwitchView = Ui.zoneSwitch(this, "video", ::openZone).apply {
+                layoutParams = LinearLayout.LayoutParams(-2, Ui.dp(this@MainActivity, 48)).apply {
+                    marginStart = Ui.dp(this@MainActivity, 6)
+                    marginEnd = Ui.dp(this@MainActivity, 6)
+                }
+            }
+            toolbar.addView(zoneSwitchView)
             toolbar.addView(channelScroll, LinearLayout.LayoutParams(0, Ui.dp(this, 58), 1f))
             toolbar.addView(moreButton)
             toolbar.addView(View(this).apply { setBackgroundColor(Ui.divider) }, LinearLayout.LayoutParams(Ui.dp(this, 1), Ui.dp(this, 24)))
@@ -231,6 +238,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateTabs() {
+        zoneSwitchView?.let { Ui.setZoneSwitchSelection(it, "video") }
         (navButtons + fixedButtons).forEach { (key, button) ->
             val selected = key == currentKey
             button.setTextColor(if (selected) android.graphics.Color.WHITE else Ui.muted)
@@ -239,6 +247,14 @@ class MainActivity : AppCompatActivity() {
         val other = ChannelCatalog.find(currentKey)?.takeIf { currentKey !in navButtons }
         moreButton.text = other?.let { "${it.title} ▾" } ?: "更多 ▾"
         moreButton.background = Ui.roundedBackground(if (other != null) 0x27FFFFFF else android.graphics.Color.TRANSPARENT, Ui.dp(this, 12))
+    }
+
+    private fun openZone(zone: String) {
+        when (zone) {
+            "video" -> selectChannel("home")
+            "bangumi" -> startActivity(Intent(this, BangumiActivity::class.java))
+            "live" -> startActivity(Intent(this, LiveActivity::class.java))
+        }
     }
 
     fun selectChannel(key: String) {
@@ -299,17 +315,29 @@ class MainActivity : AppCompatActivity() {
         pages.values.forEach { it.deactivate() }
         currentKey = "search"
         updateTabs()
-        val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, Ui.dp(context, 16), 0, 0) }
-        val row = LinearLayout(this)
-        val input = EditText(this).apply {
-            hint = "关键词 / BV 号"
-            setSingleLine(true)
-            setTextColor(Ui.text); setHintTextColor(Ui.muted)
-            background = Ui.panel(context)
+        val page = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(Ui.dp(context, 8), Ui.dp(context, 12), Ui.dp(context, 8), 0)
         }
-        row.addView(input, LinearLayout.LayoutParams(0, Ui.dp(this, 50), 1f))
+        page.addView(Ui.text(this, "搜索视频", 25f, Ui.text).apply {
+            setPadding(Ui.dp(context, 4), 0, 0, 0)
+        }, LinearLayout.LayoutParams(-1, Ui.dp(this, 46)).apply {
+            bottomMargin = Ui.dp(this@MainActivity, 10)
+        })
+        val input = Ui.searchInput(this, "输入关键词或 BV 号").apply { tag = "video-search-input" }
+        val submit = Ui.button(this, "搜索") {}.apply { tag = "video-search-submit" }
+        val row = Ui.searchBox(this, input, submit)
+        Ui.linkSearchFocus(input, submit)
+        page.addView(row, LinearLayout.LayoutParams(-1, if (Ui.isTelevision(this)) Ui.dp(this, 58) else Ui.dp(this, 64)))
         val status = Ui.text(this, "输入关键词发现视频，或输入 BV 号直接打开", 14f, Ui.muted)
-        val results = RecyclerView(this).apply { layoutManager = GridLayoutManager(this@MainActivity, settings.gridColumns) }
+        status.tag = "video-search-status"
+        val results = RecyclerView(this).apply {
+            layoutManager = GridLayoutManager(this@MainActivity, settings.gridColumns)
+            itemAnimator = null
+            clipToPadding = false
+            setPadding(Ui.dp(context, 2), Ui.dp(context, 4), Ui.dp(context, 2), 0)
+            descendantFocusability = android.view.ViewGroup.FOCUS_AFTER_DESCENDANTS
+        }
         fun search() {
             val keyword = input.text.toString().trim()
             if (keyword.isEmpty()) { Toast.makeText(this, "请输入搜索内容", Toast.LENGTH_SHORT).show(); return }
@@ -327,10 +355,12 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-        row.addView(tab("搜索") { search() })
+        submit.setOnClickListener { search() }
         input.setOnEditorActionListener { _, _, _ -> search(); true }
-        page.addView(row)
-        page.addView(status)
+        page.addView(status, LinearLayout.LayoutParams(-1, Ui.dp(this, 42)).apply {
+            topMargin = Ui.dp(this@MainActivity, 8)
+            bottomMargin = Ui.dp(this@MainActivity, 2)
+        })
         page.addView(results, LinearLayout.LayoutParams(-1, 0, 1f))
         content.removeAllViews(); content.addView(page)
         input.requestFocus()
@@ -348,7 +378,11 @@ class MainActivity : AppCompatActivity() {
             openSettings = { openSettings("appearance") })
         content.removeAllViews()
         content.addView(page)
-        restoreTag?.let { tag -> page.post { page.findViewWithTag<View>(tag)?.requestFocus() } }
+        page.post {
+            val target = restoreTag?.let { tag -> page.findViewWithTag<View>(tag) }
+                ?: page.findViewWithTag<View>("account/login")
+            target?.requestFocus()
+        }
     }
 
     private class Holder(view: View) : RecyclerView.ViewHolder(view)

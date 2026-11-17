@@ -400,7 +400,11 @@ class BrowsePage(
             rail.status.isFocusable = false
             if (active && (focusNew || rail.focusWhenReady)) {
                 rail.focusWhenReady = false
-                focusCard(rail, if (focusNew) oldSize else rail.focusIndex)
+                focusCard(
+                    rail,
+                    if (focusNew) oldSize else rail.focusIndex,
+                    smoothToAppendedCard = focusNew && oldSize > 0,
+                )
             }
             if (channel == null && settings.heroEnabled && !grid && oldSize == 0 && rail === rails.firstOrNull()) addHero(newItems.first())
         }
@@ -639,20 +643,27 @@ class BrowsePage(
         }
     }
 
-    private fun focusCard(rail: Rail, index: Int, force: Boolean = false) {
+    private fun focusCard(
+        rail: Rail,
+        index: Int,
+        force: Boolean = false,
+        smoothToAppendedCard: Boolean = false,
+    ) {
         if (!active || rail.items.isEmpty()) return
         focusRail = rail
         lastFocusedRail = rail
         val position = index.coerceIn(0, rail.items.lastIndex)
         rail.focusIndex = position
         if (rail.list.findViewHolderForAdapterPosition(position) == null) {
-            (rail.list.layoutManager as LinearLayoutManager).scrollToPositionWithOffset(position, 0)
+            if (smoothToAppendedCard) rail.list.smoothScrollToPosition(position)
+            else (rail.list.layoutManager as LinearLayoutManager).scrollToPositionWithOffset(position, 0)
         }
         fun request(attempt: Int) {
             if (!active || !force && focusRail !== rail) return
             val card = rail.list.findViewHolderForAdapterPosition(position)?.itemView
-            if (card != null) card.requestFocus()
-            else if (attempt < 4) rail.list.postOnAnimation { request(attempt + 1) }
+            if (card?.requestFocus() == true) return
+            val maxAttempts = if (smoothToAppendedCard) 90 else 4
+            if (attempt < maxAttempts) rail.list.postOnAnimation { request(attempt + 1) }
         }
         rail.list.post { request(0) }
     }

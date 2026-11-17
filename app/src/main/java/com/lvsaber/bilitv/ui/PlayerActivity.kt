@@ -105,7 +105,12 @@ class PlayerActivity : AppCompatActivity() {
     private val danmakuTicker = object : Runnable {
         override fun run() {
             if (!isFinishing && !isDestroyed && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
-                if (::danmakuOverlay.isInitialized) danmakuOverlay.positionMs = player?.currentPosition ?: 0L
+                if (::danmakuOverlay.isInitialized) {
+                    // ExoPlayer reports 0/old-item positions while the new media
+                    // item is preparing. Keep danmaku on the requested resume
+                    // position until the new source is actually ready.
+                    danmakuOverlay.positionMs = if (sourceReady) player?.currentPosition ?: resumePosition else resumePosition
+                }
                 tickerHandler.postDelayed(this, 16L)
             }
         }
@@ -184,10 +189,8 @@ class PlayerActivity : AppCompatActivity() {
             setOnClickListener { controls.toggleVisibility() }
         }
         root.addView(playerView, FrameLayout.LayoutParams(-1, -1))
-        playerView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            updateDanmakuViewport()
-        }
         danmakuOverlay = DanmakuOverlay(this)
+        danmakuOverlay.positionMs = resumePosition
         root.addView(danmakuOverlay, FrameLayout.LayoutParams(-1, -1))
         subtitleOverlay = SubtitleOverlay(this)
         root.addView(subtitleOverlay, FrameLayout.LayoutParams(-1, -1))
@@ -237,27 +240,7 @@ class PlayerActivity : AppCompatActivity() {
             focusVideo = { root.requestFocus() })
         root.addView(controls, FrameLayout.LayoutParams(-1, -1))
         root.post { if (errorView?.visibility != View.VISIBLE && !isDestroyed) controls.showControls() }
-        root.post { updateDanmakuViewport() }
         return root
-    }
-
-    private fun updateDanmakuViewport() {
-        if (!::danmakuOverlay.isInitialized || !::playerView.isInitialized) return
-        val surface = playerView.videoSurfaceView
-        if (surface == null || surface.width <= 0 || surface.height <= 0) {
-            danmakuOverlay.setVideoBounds(null)
-            return
-        }
-        val overlayLocation = IntArray(2)
-        val surfaceLocation = IntArray(2)
-        danmakuOverlay.getLocationOnScreen(overlayLocation)
-        surface.getLocationOnScreen(surfaceLocation)
-        danmakuOverlay.setVideoBounds(android.graphics.RectF(
-            (surfaceLocation[0] - overlayLocation[0]).toFloat(),
-            (surfaceLocation[1] - overlayLocation[1]).toFloat(),
-            (surfaceLocation[0] - overlayLocation[0] + surface.width).toFloat(),
-            (surfaceLocation[1] - overlayLocation[1] + surface.height).toFloat(),
-        ))
     }
 
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
@@ -388,6 +371,7 @@ class PlayerActivity : AppCompatActivity() {
         currentCid = playable.cid
         currentTitle = playable.displayTitle
         resumePosition = ProgressRepository.get(this).findPgc(playable.episodeId)?.takeIf { it.canResume }?.positionMs ?: 0L
+        danmakuOverlay.positionMs = resumePosition
         sourceReady = false
         currentSource = null
         player?.pause()
@@ -495,8 +479,9 @@ class PlayerActivity : AppCompatActivity() {
                 playerView.player = exoPlayer
                 exoPlayer.addListener(object : Player.Listener {
                     override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                        // DanmakuOverlay derives a stable fit viewport from its own window
+                        // size and this aspect ratio; do not follow transient SurfaceView bounds.
                         danmakuOverlay.videoAspectRatio = if (videoSize.height > 0) videoSize.width * videoSize.pixelWidthHeightRatio / videoSize.height else 0f
-                        playerView.post { updateDanmakuViewport() }
                     }
                     override fun onPlaybackStateChanged(playbackState: Int) {
                         if (lastPlaybackState != Player.STATE_BUFFERING && playbackState == Player.STATE_BUFFERING) {
@@ -860,7 +845,8 @@ class PlayerActivity : AppCompatActivity() {
                 if (isDestroyed || isFinishing || token != danmakuRequestGeneration || cid != currentCid) return@runOnUiThread
                 danmakuLoading = false
                 result.onSuccess { items ->
-                    danmakuOverlay.submit(items)
+                    val timelinePosition = if (sourceReady) player?.currentPosition ?: resumePosition else resumePosition
+                    danmakuOverlay.submit(items, playbackPositionMs = timelinePosition)
                     danmakuState = if (items.isEmpty()) "暂无" else "开"
                 }.onFailure {
                     danmakuState = "失败"
